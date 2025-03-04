@@ -10,7 +10,6 @@ import numpy as np
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.preprocessing import LabelEncoder
 import malariagen_data
-pf7 = malariagen_data.Pf7()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -150,143 +149,90 @@ def encode_labels(labels, encoder = None):
     return encoded_labels, encoder
 
 def main():
-    # Define paths - adjust these to match your actual project structure
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    data_dir = os.path.join(base_dir, "data")
-    raw_dir = os.path.join(data_dir, "raw")
-    
-    metadata_path = os.path.join(raw_dir, "Pf7_samples.txt")
-    fasta_path = os.path.join(raw_dir, "Pfalciparum.genome.fasta")
-    
-    # Check if files exist
-    if not os.path.exists(metadata_path):
-        logging.error(f"Metadata file not found: {metadata_path}")
-        logging.info(f"Current working directory: {os.getcwd()}")
-        logging.info(f"Please make sure the file exists or adjust the path")
-        return
-    
-    if not os.path.exists(fasta_path):
-        logging.error(f"FASTA file not found: {fasta_path}")
-        logging.info(f"Current working directory: {os.getcwd()}")
-        logging.info(f"Please make sure the file exists or adjust the path")
-        return
-    
-    # Load metadata and sequences
-    metadata = load_metadata(metadata_path)
-    metadata = extract_metadata(metadata)
-    
-    # After loading metadata and sequences, add these debug statements:
-    logging.info(f"Loaded metadata with {len(metadata)} rows")
-    logging.info(f"Metadata columns: {list(metadata.columns)}")
-    logging.info(f"First few 'Sample' values: {metadata['Sample'].head().tolist()}")
-    
-    # Filter metadata for quality
-    quality_metadata = metadata[metadata["QC pass"] == True].copy()
-    
-    # Load and filter sequences
-    sequences = load_sequence_data(fasta_path)
-    logging.info(f"Loaded {len(sequences)} sequences from FASTA file")
-    logging.info(f"First few sequence IDs: {list(sequences.keys())[:5]}")
-    
-    # Check sequence ID format
-    if sequences and metadata.shape[0] > 0:
-        sample_seq_id = list(sequences.keys())[0]
-        sample_metadata_id = metadata['Sample'].iloc[0]
-        logging.info(f"Sample sequence ID format: '{sample_seq_id}'")
-        logging.info(f"Sample metadata ID format: '{sample_metadata_id}'")
-    
-    # After filtering sequences
-    filtered_sequences = filter_sequences(sequences, max_ambiguous_ratio=0.01)
-    logging.info(f"After filtering, {len(filtered_sequences)} sequences remain")
-    
-    # After filtering metadata for quality
-    quality_metadata = metadata[metadata["QC pass"] == True].copy()
-    logging.info(f"After quality filtering, {len(quality_metadata)} metadata rows remain")
-    
-    # Check for ID matching issues before attempting to map
-    if len(quality_metadata) > 0 and len(filtered_sequences) > 0:
-        # Check if any sample IDs match sequence IDs
-        sample_ids = set(quality_metadata['Sample'].tolist())
-        sequence_ids = set(filtered_sequences.keys())
-        common_ids = sample_ids.intersection(sequence_ids)
+    logging.info("Initializing Pf7 data access...")
+    os.environ['FSSPEC_URL_SEPARATOR'] = '/'
+
+    # Initialize with explicit GCS protocol
+    pf7 = malariagen_data.Pf7(use_gcs=True)    
+    # Use the malariagen_data package to access data
+    try:
+        # This will initialize data access and might download files if not already present
+        sample_metadata = pf7.sample_metadata()
+        logging.info(f"Successfully loaded metadata for {len(sample_metadata)} samples")
+        logging.info(f"Metadata columns: {list(sample_metadata.columns)}")
         
-        logging.info(f"Number of sample IDs that match sequence IDs: {len(common_ids)}")
+        # Filter for quality
+        quality_metadata = sample_metadata[sample_metadata["qc_pass"] == True].copy()
+        logging.info(f"After quality filtering, {len(quality_metadata)} samples remain")
         
-        if len(common_ids) == 0:
-            logging.error("No matching IDs found between metadata and sequences!")
-            logging.info("This might be due to formatting differences in IDs.")
-            
-            # Try a simple transformation to see if it helps
-            logging.info("Attempting to find matches with simple transformations...")
-            
-            # Option 1: Try lowercasing both
-            lower_sample_ids = {s.lower() for s in sample_ids}
-            lower_seq_ids = {s.lower() for s in sequence_ids}
-            common_lower = lower_sample_ids.intersection(lower_seq_ids)
-            logging.info(f"Matches after lowercasing: {len(common_lower)}")
-            
-            # Option 2: Try removing any prefixes/suffixes
-            # This assumes IDs might have format differences like "sample_12345" vs "12345"
-            # Extract numeric parts only
-            import re
-            numeric_sample_ids = {re.sub(r'[^0-9]', '', s) for s in sample_ids if re.search(r'\d', s)}
-            numeric_seq_ids = {re.sub(r'[^0-9]', '', s) for s in sequence_ids if re.search(r'\d', s)}
-            common_numeric = numeric_sample_ids.intersection(numeric_seq_ids)
-            logging.info(f"Matches when comparing only numeric parts: {len(common_numeric)}")
-            
-            # Print a few examples to help diagnose the issue
-            logging.info(f"Sample ID examples: {list(sample_ids)[:5]}")
-            logging.info(f"Sequence ID examples: {list(sequence_ids)[:5]}")
-            
-            # If transformations found matches, offer a suggestion
-            if len(common_lower) > 0:
-                logging.info("Consider using lowercase transformation for matching.")
-            if len(common_numeric) > 0:
-                logging.info("Consider extracting numeric parts for matching.")
-    
-    # Continue with existing code...
-    quality_metadata['Sequence'] = quality_metadata['Sample'].map(filtered_sequences)
-    matched_data = quality_metadata.dropna(subset=['Sequence'])
-    
-    logging.info(f"Successfully matched {len(matched_data)} samples with sequences")
-    
-    if len(matched_data) == 0:
-        logging.error("No samples could be matched with sequences - cannot proceed.")
+        # Get country distribution
+        country_counts = quality_metadata['country'].value_counts()
+        logging.info(f"Sample distribution by country:\n{country_counts.head(10)}")
+        
+        # Check if we have enough samples per country for classification
+        min_samples_per_class = 50  # Minimum samples needed for a reliable classification model
+        valid_countries = country_counts[country_counts >= min_samples_per_class].index
+        logging.info(f"Found {len(valid_countries)} countries with at least {min_samples_per_class} samples")
+        
+        # Filter metadata to include only countries with sufficient samples
+        filtered_metadata = quality_metadata[quality_metadata['country'].isin(valid_countries)].copy()
+        logging.info(f"Working with {len(filtered_metadata)} samples from {len(valid_countries)} countries")
+        
+        # Process genomic data
+        # Option 1: Access variant data (SNPs)
+        # This gives you access to genetic variants rather than full sequences
+        # Variant data might be more appropriate for classification tasks
+        
+        # Example: Get variants for chromosome 1
+        logging.info("Accessing variant data for chromosome 1...")
+        variants = pf7.snp_genotypes(region="Pf3D7_01_v3", sample_selection=filtered_metadata.index)
+        logging.info(f"Loaded {variants.shape[1]} variants for chromosome 1")
+        
+        # Convert variant data to features
+        # Here we'll create a simple binary feature matrix (presence/absence of variants)
+        # For each sample (row) and variant position (column)
+        logging.info("Converting variant data to feature matrix...")
+        variant_features = variants.to_n_alt().compute()  # Convert to number of alternate alleles (0, 1, 2)
+        variant_binary = (variant_features > 0).astype(int)  # Convert to binary (variant present/absent)
+        
+        # Use scikit-learn to apply TF-IDF weighting
+        from sklearn.feature_extraction.text import TfidfTransformer
+        tfidf_transformer = TfidfTransformer(norm='l2', smooth_idf=True)
+        variant_tfidf = tfidf_transformer.fit_transform(variant_binary)
+        
+        # Encode geographic labels
+        country_labels = filtered_metadata["country"].values
+        encoded_labels, label_encoder = encode_labels(country_labels)
+        
+        # Add encoded labels back to DataFrame
+        filtered_metadata['encoded_country'] = encoded_labels
+        
+        # Save processed data
+        processed_dir = os.path.join("data", "processed")
+        os.makedirs(processed_dir, exist_ok=True)
+        
+        # Save metadata
+        metadata_output = os.path.join(processed_dir, "filtered_metadata.csv")
+        filtered_metadata.to_csv(metadata_output, index=False)
+        
+        # Save feature matrix
+        import scipy.sparse as sp
+        feature_output = os.path.join(processed_dir, "variant_features.npz")
+        sp.save_npz(feature_output, variant_tfidf)
+        
+        # Save encoder
+        import pickle
+        with open(os.path.join(processed_dir, "label_encoder.pkl"), "wb") as f:
+            pickle.dump(label_encoder, f)
+        
+        logging.info(f"Preprocessing complete. Data saved to {processed_dir}")
+        
+    except Exception as e:
+        logging.error(f"Error accessing Pf7 data: {str(e)}")
+        logging.error("Please check your internet connection and retry")
+        import traceback
+        logging.error(traceback.format_exc())
         return
-    
-    # Generate k-mer features from the sequences
-    sequence_list = matched_data['Sequence'].tolist()
-    kmer_counts, vectorizer = generate_kmers(sequence_list, k=6)
-    kmer_tfidf, tfidf_transformer = apply_tfidf(kmer_counts)
-    
-    # Encode geographic labels for classification
-    country_labels = matched_data["Country"].tolist()
-    encoded_labels, label_encoder = encode_labels(country_labels)
-    
-    # Add the encoded labels back to the DataFrame
-    matched_data['EncodedCountry'] = encoded_labels
-    
-    # Save processed data
-    processed_dir = os.path.join("data", "processed")
-    os.makedirs(processed_dir, exist_ok=True)
-    
-    # Save metadata with sequences
-    metadata_output = os.path.join(processed_dir, "metadata_with_sequences.csv")
-    matched_data.to_csv(metadata_output, index=False)
-    
-    # Save feature matrices
-    import scipy.sparse as sp
-    feature_output = os.path.join(processed_dir, "kmer_features.npz")
-    sp.save_npz(feature_output, kmer_tfidf)
-    
-    # Save vectorizer and encoder for future use
-    import pickle
-    with open(os.path.join(processed_dir, "vectorizer.pkl"), "wb") as f:
-        pickle.dump(vectorizer, f)
-    with open(os.path.join(processed_dir, "label_encoder.pkl"), "wb") as f:
-        pickle.dump(label_encoder, f)
-    
-    logging.info(f"Preprocessing complete. Data saved to {processed_dir}")
 
 if __name__ == "__main__":
     main()
