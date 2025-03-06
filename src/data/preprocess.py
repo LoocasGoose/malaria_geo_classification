@@ -7,9 +7,12 @@ import logging
 from Bio import SeqIO
 import pandas as pd
 import numpy as np
+import pickle
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.preprocessing import LabelEncoder
 import malariagen_data
+from scipy import sparse
+import xarray as xr
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -129,16 +132,25 @@ def generate_kmers(sequences, k=6):
         logging.info(f"Generated {len(vectorizer.get_feature_names_out())} unique {k}-mers with min_df=1")
         return X_counts, vectorizer
 
-
-def apply_tfidf(X_counts):
-    tfidf_transformer = TfidfTransformer(
-        norm='l2',  # Normalize vectors
-        smooth_idf=True  # Prevent divide-by-zero
-    )
+def apply_tfidf_batched(binary_matrix, batch_size=5000):
+    """Apply TF-IDF transformation in batches to save memory"""
+    transformer = TfidfTransformer(norm='l2', smooth_idf=True)
     
-    X_tfidf = tfidf_transformer.fit_transform(X_counts)
+    # Fit on entire dataset
+    transformer.fit(binary_matrix)
     
-    return X_tfidf, tfidf_transformer
+    # Transform in batches
+    n_samples = binary_matrix.shape[0]
+    result_parts = []
+    
+    for start in range(0, n_samples, batch_size):
+        end = min(start + batch_size, n_samples)
+        batch = binary_matrix[start:end]
+        transformed_batch = transformer.transform(batch)
+        result_parts.append(transformed_batch)
+    
+    # Combine results
+    return sparse.vstack(result_parts)
 
 def encode_labels(labels, encoder = None):
     if encoder is None:
@@ -178,28 +190,6 @@ def main():
         filtered_metadata = quality_metadata[quality_metadata['country'].isin(valid_countries)].copy()
         logging.info(f"Working with {len(filtered_metadata)} samples from {len(valid_countries)} countries")
         
-        # Process genomic data
-        # Option 1: Access variant data (SNPs)
-        # This gives you access to genetic variants rather than full sequences
-        # Variant data might be more appropriate for classification tasks
-        
-        # Example: Get variants for chromosome 1
-        logging.info("Accessing variant data for chromosome 1...")
-        variants = pf7.snp_genotypes(region="Pf3D7_01_v3", sample_selection=filtered_metadata.index)
-        logging.info(f"Loaded {variants.shape[1]} variants for chromosome 1")
-        
-        # Convert variant data to features
-        # Here we'll create a simple binary feature matrix (presence/absence of variants)
-        # For each sample (row) and variant position (column)
-        logging.info("Converting variant data to feature matrix...")
-        variant_features = variants.to_n_alt().compute()  # Convert to number of alternate alleles (0, 1, 2)
-        variant_binary = (variant_features > 0).astype(int)  # Convert to binary (variant present/absent)
-        
-        # Use scikit-learn to apply TF-IDF weighting
-        from sklearn.feature_extraction.text import TfidfTransformer
-        tfidf_transformer = TfidfTransformer(norm='l2', smooth_idf=True)
-        variant_tfidf = tfidf_transformer.fit_transform(variant_binary)
-        
         # Encode geographic labels
         country_labels = filtered_metadata["country"].values
         encoded_labels, label_encoder = encode_labels(country_labels)
@@ -207,25 +197,57 @@ def main():
         # Add encoded labels back to DataFrame
         filtered_metadata['encoded_country'] = encoded_labels
         
+        # Load variant data once
+        logging.info("Loading variant calls...")
+        variant_data = pf7.variant_calls(extended=False)
+        variant_data = variant_data.sel(sample=filtered_metadata.index)
+        
+        # Get chromosome names to filter variants
+        contig_info = pf7.genome_sequence().attrs["contigs"]
+        chrom_names = contig_info["id"]
+        chrom_indices = {name: idx for idx, name in enumerate(chrom_names)}
+        
+        # Process selected chromosomes
+        selected_chroms = ["Pf3D7_01_v3", "Pf3D7_04_v3", "Pf3D7_07_v3", "Pf3D7_13_v3"]
+        all_variant_features = []
+        
+        for chrom in selected_chroms:
+            logging.info(f"Processing {chrom}...")
+            chrom_idx = chrom_indices[chrom]
+            # Filter variants by chromosome
+            mask = variant_data["variant_contig"] == chrom_idx
+            chrom_variants = variant_data.sel(variant=mask)
+            
+            # Extract genotypes and convert to binary presence/absence
+            genotypes = chrom_variants["call_genotype"].data
+            variant_presence = (genotypes > 0).any(axis=2).astype(np.int8)  # Sparse-friendly
+            variant_presence = sparse.csr_matrix(variant_presence.T)  # Transpose to samples x variants
+            
+            all_variant_features.append(variant_presence)
+        
+        # Combine all variant features
+        combined_features = sparse.hstack(all_variant_features, format='csr')
+        logging.info(f"Total variants: {combined_features.shape[1]}")
+        
+        # Apply TF-IDF transformation
+        logging.info("Applying TF-IDF transformation...")
+        tfidf_features = apply_tfidf_batched(combined_features)
+        
         # Save processed data
         processed_dir = os.path.join("data", "processed")
         os.makedirs(processed_dir, exist_ok=True)
         
         # Save metadata
-        metadata_output = os.path.join(processed_dir, "filtered_metadata.csv")
-        filtered_metadata.to_csv(metadata_output, index=False)
+        filtered_metadata.to_csv(os.path.join(processed_dir, "filtered_metadata.csv"), index=False)
         
-        # Save feature matrix
-        import scipy.sparse as sp
-        feature_output = os.path.join(processed_dir, "variant_features.npz")
-        sp.save_npz(feature_output, variant_tfidf)
+        # Save TF-IDF features
+        sparse.save_npz(os.path.join(processed_dir, "variant_features.npz"), tfidf_features)
         
-        # Save encoder
-        import pickle
+        # Save label encoder
         with open(os.path.join(processed_dir, "label_encoder.pkl"), "wb") as f:
             pickle.dump(label_encoder, f)
         
-        logging.info(f"Preprocessing complete. Data saved to {processed_dir}")
+        logging.info("Preprocessing completed successfully.")
         
     except Exception as e:
         logging.error(f"Error accessing Pf7 data: {str(e)}")
