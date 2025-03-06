@@ -6,11 +6,16 @@ import os
 import pandas as pd
 import pickle
 import json
+import hashlib
+import logging
 from scipy.sparse import load_npz, save_npz
 from sklearn.model_selection import train_test_split
 import numpy as np
 from collections import Counter
 from datetime import datetime
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_data():
     """
@@ -30,9 +35,17 @@ def load_data():
         Label encoder for geographic labels
     """
     metadata = pd.read_csv("data/processed/filtered_metadata.csv")
-    y = metadata["encoded_country"].values
     sample_ids = metadata["Sample"].values
+    
+    # Set Sample as index for faster lookups
+    metadata.set_index("Sample", inplace=True, drop=False)
+    y = metadata["encoded_country"].values
+    
+    # Load sparse matrix with validation
     X = load_npz("data/processed/variant_features.npz")
+    if X.shape[0] != len(metadata):
+        raise ValueError(f"Mismatch between features ({X.shape[0]}) and metadata ({len(metadata)})")
+    
     with open("data/processed/label_encoder.pkl", "rb") as f:
         encoder = pickle.load(f)
     
@@ -64,26 +77,30 @@ def split_data(features, labels, sample_ids, test_size=0.15, val_size=0.15, rand
     X_train, X_val, X_test, y_train, y_val, y_test, idx_train, idx_val, idx_test : arrays
         Split datasets and corresponding indices
     """
+    # Calculate absolute sizes for more precise split control
+    n_total = features.shape[0]
+    n_test = int(n_total * test_size)
+    n_val = int(n_total * val_size)
+    
     # First split: Separate out the test set
     X_train_val, X_test, y_train_val, y_test, idx_train_val, idx_test = train_test_split(
         features, labels, sample_ids,
-        test_size=test_size,
+        test_size=n_test,
         stratify=labels if stratify else None,
         random_state=random_state
     )
 
     # Second split: Separate validation set from the remaining training data
-    val_size_adjusted = val_size / (1 - test_size)  # Adjust validation size relative to remaining data
     X_train, X_val, y_train, y_val, idx_train, idx_val = train_test_split(
         X_train_val, y_train_val, idx_train_val,
-        test_size=val_size_adjusted,
+        test_size=n_val,
         stratify=y_train_val if stratify else None,
         random_state=random_state
     )
 
     return X_train, X_val, X_test, y_train, y_val, y_test, idx_train, idx_val, idx_test
 
-def check_split_feasibility(labels, test_size, val_size, min_samples_per_class=1):
+def check_split_feasibility(labels, test_size, val_size, min_samples_per_class=5):
     """
     Check if the requested split is possible given the geographic distribution.
     Some regions might have too few samples to be represented in all splits.
@@ -104,38 +121,45 @@ def check_split_feasibility(labels, test_size, val_size, min_samples_per_class=1
     bool
         True if the split is feasible, raises ValueError otherwise
     """
-    # Count samples per class
-    class_counts = Counter(labels)
-    
-    # Calculate train size
-    train_size = 1 - test_size - val_size
-    
-    # Calculate minimum samples needed for each class to ensure representation
-    for class_label, count in class_counts.items():
-        train_expected = count * train_size
-        val_expected = count * val_size
-        test_expected = count * test_size
+    # Simulate actual splits to check feasibility
+    try:
+        # First check test split
+        _, y_test = train_test_split(
+            labels, 
+            test_size=test_size, 
+            stratify=labels,
+            random_state=0
+        )
         
-        if train_expected < min_samples_per_class:
-            raise ValueError(f"Class {class_label} has only {count} samples, which is not enough for {min_samples_per_class} "
-                           f"samples in the training set (expected: {train_expected:.1f})")
+        # Then check validation split
+        remaining_y = np.delete(labels, np.arange(len(y_test)))
+        _, y_val = train_test_split(
+            remaining_y,
+            test_size=val_size/(1-test_size),
+            stratify=remaining_y,
+            random_state=0
+        )
         
-        if val_expected < min_samples_per_class:
-            raise ValueError(f"Class {class_label} has only {count} samples, which is not enough for {min_samples_per_class} "
-                           f"samples in the validation set (expected: {val_expected:.1f})")
-            
-        if test_expected < min_samples_per_class:
-            raise ValueError(f"Class {class_label} has only {count} samples, which is not enough for {min_samples_per_class} "
-                           f"samples in the test set (expected: {test_expected:.1f})")
+        # Check minimums in each split
+        for split_name, split_labels in [("Training", remaining_y[len(y_val):]), 
+                                         ("Validation", y_val), 
+                                         ("Test", y_test)]:
+            class_counts = Counter(split_labels)
+            min_class = min(class_counts.items(), key=lambda x: x[1])
+            if min_class[1] < min_samples_per_class:
+                raise ValueError(f"{split_name} split would have class {min_class[0]} with only {min_class[1]} samples")
+    
+    except ValueError as e:
+        raise ValueError(f"Split feasibility check failed: {str(e)}")
     
     # Print statistics about class distribution
-    min_class = min(class_counts.items(), key=lambda x: x[1])
-    max_class = max(class_counts.items(), key=lambda x: x[1])
+    min_class = min(Counter(labels).items(), key=lambda x: x[1])
+    max_class = max(Counter(labels).items(), key=lambda x: x[1])
     
-    print(f"Class distribution check passed:")
-    print(f"  Minimum class: {min_class[0]} with {min_class[1]} samples")
-    print(f"  Maximum class: {max_class[0]} with {max_class[1]} samples")
-    print(f"  Each split will have at least {min_samples_per_class} samples per class")
+    logging.info("Class distribution check passed:")
+    logging.info(f"  Minimum class: {min_class[0]} with {min_class[1]} samples")
+    logging.info(f"  Maximum class: {max_class[0]} with {max_class[1]} samples")
+    logging.info(f"  Each split will have at least {min_samples_per_class} samples per class")
     
     return True
 
@@ -174,9 +198,15 @@ def save_splits(output_dir, X_train, X_val, X_test, y_train, y_val, y_test,
     
     # Save metadata if provided
     if metadata is not None and all(x is not None for x in [idx_train, idx_val, idx_test]):
-        train_metadata = metadata.loc[metadata["Sample"].isin(idx_train)].copy()
-        val_metadata = metadata.loc[metadata["Sample"].isin(idx_val)].copy()
-        test_metadata = metadata.loc[metadata["Sample"].isin(idx_test)].copy()
+        # More efficient index-based selection
+        train_metadata = metadata.loc[idx_train].copy()
+        val_metadata = metadata.loc[idx_val].copy()
+        test_metadata = metadata.loc[idx_test].copy()
+        
+        # Convert object columns to category for efficiency
+        for df in [train_metadata, val_metadata, test_metadata]:
+            for col in df.select_dtypes(include=['object']).columns:
+                df[col] = df[col].astype('category')
         
         train_metadata.to_csv(os.path.join(output_dir, "train_metadata.csv"), index=False)
         val_metadata.to_csv(os.path.join(output_dir, "val_metadata.csv"), index=False)
@@ -213,6 +243,11 @@ def save_splits(output_dir, X_train, X_val, X_test, y_train, y_val, y_test,
         
         split_info["country_distribution"] = country_distribution
         split_info["countries"] = list(encoder.classes_)
+    
+    # Add data fingerprint for versioning
+    if metadata is not None:
+        data_fingerprint = hashlib.md5(pd.util.hash_pandas_object(metadata).values).hexdigest()
+        split_info["data_fingerprint"] = data_fingerprint
     
     with open(os.path.join(output_dir, "split_info.json"), "w") as f:
         json.dump(split_info, f, indent=2)
@@ -295,20 +330,29 @@ def main():
     try:
         os.makedirs(split_dir, exist_ok=True)
     except OSError as e:
-        print(f"Error: Failed to create directory {split_dir}: {e}")
+        logging.error(f"Failed to create directory {split_dir}: {e}")
         return
+    
+    # Generate data fingerprint for versioning
+    data_fingerprint = hashlib.md5(pd.util.hash_pandas_object(metadata).values).hexdigest()
     
     # Check if split already exists with requested proportions
     split_info_path = os.path.join(split_dir, "split_info.json")
     if os.path.exists(split_info_path):
         try:
             with open(split_info_path, "r") as f:
-                existing_split_info = json.load(f)
+                existing_info = json.load(f)
             
-            # Validate the presence and type of expected fields
-            existing_train = existing_split_info.get("train_size")
-            existing_val = existing_split_info.get("val_size")
-            existing_test = existing_split_info.get("test_size")
+            # Check data fingerprint first to detect data changes
+            if existing_info.get("data_fingerprint") == data_fingerprint:
+                logging.info(f"Found existing split with same data fingerprint")
+                logging.info(f"Using existing split in {split_dir}")
+                return
+                
+            # Otherwise check proportions
+            existing_train = existing_info.get("train_size")
+            existing_val = existing_info.get("val_size")
+            existing_test = existing_info.get("test_size")
             
             if not all(isinstance(x, (int, float)) for x in [existing_train, existing_val, existing_test]):
                 raise ValueError("Split proportions must be numeric.")
@@ -317,42 +361,41 @@ def main():
             if (abs(existing_train - train_size) < 0.01 and 
                 abs(existing_val - val_size) < 0.01 and
                 abs(existing_test - test_size) < 0.01):
-                print(f"Found existing split with {existing_train:.0%}/{existing_val:.0%}/{existing_test:.0%} train/val/test ratio")
-                print(f"Using existing split in {split_dir}")
-                return
+                logging.info(f"Found existing split with {existing_train:.0%}/{existing_val:.0%}/{existing_test:.0%} train/val/test ratio")
+                logging.info(f"Data has changed, re-creating the split with same proportions")
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"Warning: Failed to read or validate split_info.json: {e}")
-            print("Proceeding to create a new split.")
+            logging.warning(f"Failed to read or validate split_info.json: {e}")
+            logging.info("Proceeding to create a new split.")
         except IOError as e:
-            print(f"Error: Failed to open or read split_info.json: {e}")
+            logging.error(f"Failed to open or read split_info.json: {e}")
             return
     
-    print(f"Loading data from processed directory...")
-    print(f"Found {len(metadata)} samples with {X.shape[1]} features")
-    print(f"Countries represented: {len(encoder.classes_)}")
+    logging.info(f"Loading data from processed directory...")
+    logging.info(f"Found {len(metadata)} samples with {X.shape[1]} features")
+    logging.info(f"Countries represented: {len(encoder.classes_)}")
     
     # Check if split is feasible
     try:
         check_split_feasibility(y, test_size=test_size, val_size=val_size, min_samples_per_class=5)
     except ValueError as e:
-        print(f"Error: {e}")
-        print("Data split is not feasible with the current configuration.")
+        logging.error(f"Error: {e}")
+        logging.error("Data split is not feasible with the current configuration.")
         return
     
     # Perform the split
-    print(f"Splitting data with {train_size:.0%}/{val_size:.0%}/{test_size:.0%} train/val/test ratio...")
+    logging.info(f"Splitting data with {train_size:.0%}/{val_size:.0%}/{test_size:.0%} train/val/test ratio...")
     X_train, X_val, X_test, y_train, y_val, y_test, idx_train, idx_val, idx_test = split_data(
         X, y, sample_ids, test_size=test_size, val_size=val_size, random_state=random_state, stratify=True
     )
     
     # Report split sizes
-    print(f"Split sizes:")
-    print(f"  Train: {X_train.shape[0]} samples ({X_train.shape[0]/len(X):.1%})")
-    print(f"  Validation: {X_val.shape[0]} samples ({X_val.shape[0]/len(X):.1%})")
-    print(f"  Test: {X_test.shape[0]} samples ({X_test.shape[0]/len(X):.1%})")
+    logging.info(f"Split sizes:")
+    logging.info(f"  Train: {X_train.shape[0]} samples ({X_train.shape[0]/len(X):.1%})")
+    logging.info(f"  Validation: {X_val.shape[0]} samples ({X_val.shape[0]/len(X):.1%})")
+    logging.info(f"  Test: {X_test.shape[0]} samples ({X_test.shape[0]/len(X):.1%})")
     
     # Save all split data with additional metadata
-    print(f"Saving split data to {split_dir}...")
+    logging.info(f"Saving split data to {split_dir}...")
     try:
         save_splits(
             output_dir=split_dir, 
@@ -363,11 +406,11 @@ def main():
             encoder=encoder
         )
     except IOError as e:
-        print(f"Error: Failed to save split data: {e}")
+        logging.error(f"Failed to save split data: {e}")
         return
     
-    print(f"Data splitting complete. Files saved to {split_dir}")
-    print(f"You can now proceed to model training using the split data.")
+    logging.info(f"Data splitting complete. Files saved to {split_dir}")
+    logging.info(f"You can now proceed to model training using the split data.")
 
 if __name__ == "__main__":
     main()
