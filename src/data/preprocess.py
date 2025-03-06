@@ -160,6 +160,23 @@ def encode_labels(labels, encoder = None):
     encoded_labels = encoder.transform(labels)
     return encoded_labels, encoder
 
+def cache_reference_genome():
+    """Cache reference genome locally for faster access."""
+    pf7 = malariagen_data.Pf7()
+    
+    # Define contig_info inside the function
+    contig_info = pf7.genome_sequence().attrs["contigs"]
+    
+    cache_dir = os.path.join("data", "reference")
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Save reference genome by chromosome
+    for chrom, length in zip(contig_info["id"], contig_info["length"]):
+        chrom_seq = pf7.genome_sequence(region=chrom).compute()
+        np.save(os.path.join(cache_dir, f"{chrom}.npy"), chrom_seq)
+    
+    logging.info(f"Reference genome cached in {cache_dir}")
+
 def main():
     logging.info("Initializing Pf7 data access...")
     os.environ['FSSPEC_URL_SEPARATOR'] = '/'
