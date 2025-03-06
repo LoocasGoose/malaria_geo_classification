@@ -27,8 +27,6 @@ venv/
 data/raw/
 data/processed/
 logs/
-figures/
-results/
 
 # Local Settings
 .env
