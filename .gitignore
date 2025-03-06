@@ -26,7 +26,6 @@ venv/
 # Data & Models
 data/raw/
 data/processed/
-models/
 logs/
 figures/
 results/
