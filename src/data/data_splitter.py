@@ -37,8 +37,8 @@ def load_data():
     metadata = pd.read_csv("data/processed/filtered_metadata.csv")
     sample_ids = metadata["Sample"].values
     
-    # Set Sample as index for faster lookups
-    metadata.set_index("Sample", inplace=True, drop=False)
+    # Set Sample as index for faster lookups - but drop=True to avoid duplicate columns
+    metadata.set_index("Sample", inplace=True, drop=True)
     y = metadata["encoded_country"].values
     
     # Load sparse matrix with validation
@@ -100,7 +100,7 @@ def split_data(features, labels, sample_ids, test_size=0.15, val_size=0.15, rand
 
     return X_train, X_val, X_test, y_train, y_val, y_test, idx_train, idx_val, idx_test
 
-def check_split_feasibility(labels, test_size, val_size, min_samples_per_class=5):
+def check_split_feasibility(labels, test_size, val_size, min_samples_per_class=5, random_state=42):
     """
     Check if the requested split is possible given the geographic distribution.
     Some regions might have too few samples to be represented in all splits.
@@ -115,44 +115,47 @@ def check_split_feasibility(labels, test_size, val_size, min_samples_per_class=5
         Proportion of data for validation
     min_samples_per_class : int
         Minimum number of samples required per class in each split
+    random_state : int
+        Random seed for consistent splits
         
     Returns:
     --------
     bool
         True if the split is feasible, raises ValueError otherwise
     """
-    # Simulate actual splits to check feasibility
-    try:
-        # First check test split
-        _, y_test = train_test_split(
-            labels, 
-            test_size=test_size, 
-            stratify=labels,
-            random_state=0
-        )
-        
-        # Then check validation split
-        remaining_y = np.delete(labels, np.arange(len(y_test)))
-        _, y_val = train_test_split(
-            remaining_y,
-            test_size=val_size/(1-test_size),
-            stratify=remaining_y,
-            random_state=0
-        )
-        
-        # Check minimums in each split
-        for split_name, split_labels in [("Training", remaining_y[len(y_val):]), 
-                                         ("Validation", y_val), 
-                                         ("Test", y_test)]:
-            class_counts = Counter(split_labels)
-            min_class = min(class_counts.items(), key=lambda x: x[1])
-            if min_class[1] < min_samples_per_class:
-                raise ValueError(f"{split_name} split would have class {min_class[0]} with only {min_class[1]} samples")
+    # Simulate splits using indices to match actual split behavior
+    indices = np.arange(len(labels))
     
-    except ValueError as e:
-        raise ValueError(f"Split feasibility check failed: {str(e)}")
+    # First simulate test split
+    train_val_indices, test_indices = train_test_split(
+        indices, 
+        test_size=test_size, 
+        stratify=labels,
+        random_state=random_state
+    )
+    y_test = labels[test_indices]
+    y_train_val = labels[train_val_indices]
     
-    # Print statistics about class distribution
+    # Then simulate validation split
+    train_indices, val_indices = train_test_split(
+        train_val_indices,
+        test_size=val_size/(1-test_size),
+        stratify=y_train_val,
+        random_state=random_state
+    )
+    y_val = labels[val_indices]
+    y_train = labels[train_indices]
+    
+    # Check minimums in each split
+    for split_name, split_labels in [("Training", y_train), 
+                                     ("Validation", y_val), 
+                                     ("Test", y_test)]:
+        class_counts = Counter(split_labels)
+        min_class = min(class_counts.items(), key=lambda x: x[1])
+        if min_class[1] < min_samples_per_class:
+            raise ValueError(f"{split_name} split would have class {min_class[0]} with only {min_class[1]} samples")
+    
+    # Log statistics about class distribution
     min_class = min(Counter(labels).items(), key=lambda x: x[1])
     max_class = max(Counter(labels).items(), key=lambda x: x[1])
     
@@ -191,26 +194,33 @@ def save_splits(output_dir, X_train, X_val, X_test, y_train, y_val, y_test,
     save_npz(os.path.join(output_dir, "val_features.npz"), X_val)
     save_npz(os.path.join(output_dir, "test_features.npz"), X_test)
     
-    # Save labels
+    # Save labels using compressed format
+    np.savez_compressed(os.path.join(output_dir, "train_labels.npz"), labels=y_train)
+    np.savez_compressed(os.path.join(output_dir, "val_labels.npz"), labels=y_val)
+    np.savez_compressed(os.path.join(output_dir, "test_labels.npz"), labels=y_test)
+    
+    # For backward compatibility
     np.save(os.path.join(output_dir, "train_labels.npy"), y_train)
     np.save(os.path.join(output_dir, "val_labels.npy"), y_val)
     np.save(os.path.join(output_dir, "test_labels.npy"), y_test)
     
-    # Save metadata if provided
+    # Save metadata if provided with optimized data types
     if metadata is not None and all(x is not None for x in [idx_train, idx_val, idx_test]):
-        # More efficient index-based selection
-        train_metadata = metadata.loc[idx_train].copy()
-        val_metadata = metadata.loc[idx_val].copy()
-        test_metadata = metadata.loc[idx_test].copy()
-        
-        # Convert object columns to category for efficiency
-        for df in [train_metadata, val_metadata, test_metadata]:
-            for col in df.select_dtypes(include=['object']).columns:
-                df[col] = df[col].astype('category')
-        
-        train_metadata.to_csv(os.path.join(output_dir, "train_metadata.csv"), index=False)
-        val_metadata.to_csv(os.path.join(output_dir, "val_metadata.csv"), index=False)
-        test_metadata.to_csv(os.path.join(output_dir, "test_metadata.csv"), index=False)
+        for idx_set, name in zip([idx_train, idx_val, idx_test], ["train", "val", "test"]):
+            # Get metadata subset and reset index for CSV output
+            subset = metadata.loc[idx_set].copy().reset_index()
+            
+            # Optimize numeric columns
+            for col in subset.select_dtypes(include=['float']):
+                subset[col] = pd.to_numeric(subset[col], downcast='float')
+            for col in subset.select_dtypes(include=['int']):
+                subset[col] = pd.to_numeric(subset[col], downcast='integer')
+            
+            # Convert object columns to category
+            for col in subset.select_dtypes(include=['object']):
+                subset[col] = subset[col].astype('category')
+                
+            subset.to_csv(os.path.join(output_dir, f"{name}_metadata.csv"), index=False)
     
     # Save encoder if provided
     if encoder is not None:
@@ -244,44 +254,48 @@ def save_splits(output_dir, X_train, X_val, X_test, y_train, y_val, y_test,
         split_info["country_distribution"] = country_distribution
         split_info["countries"] = list(encoder.classes_)
     
-    # Add data fingerprint for versioning
-    if metadata is not None:
-        data_fingerprint = hashlib.md5(pd.util.hash_pandas_object(metadata).values).hexdigest()
-        split_info["data_fingerprint"] = data_fingerprint
+    # Add improved data fingerprint including feature matrix info
+    if metadata is not None and X_train is not None:
+        metadata_hash = hashlib.md5(pd.util.hash_pandas_object(metadata).values).hexdigest()
+        # Include feature info (shapes and nnz count)
+        feature_info = f"{X_train.shape}|{X_val.shape}|{X_test.shape}|{X_train.nnz}|{X_val.nnz}|{X_test.nnz}"
+        combined_hash = hashlib.md5((metadata_hash + feature_info).encode()).hexdigest()
+        split_info["data_fingerprint"] = combined_hash
     
     with open(os.path.join(output_dir, "split_info.json"), "w") as f:
         json.dump(split_info, f, indent=2)
 
 def load_splits(input_dir):
     """
-    Load previously created splits from disk.
-    
-    Parameters:
-    -----------
-    input_dir : str
-        Directory containing the splits
-        
-    Returns:
-    --------
-    dict : Dictionary containing:
-        - X_train, X_val, X_test: Feature matrices
-        - y_train, y_val, y_test: Labels
-        - train_metadata, val_metadata, test_metadata: Metadata DataFrames (if available)
-        - encoder: Label encoder (if available)
-        - split_info: Split information
+    Load previously created splits from disk with improved error handling.
     """
     result = {}
     
-    # Load feature matrices
-    result["X_train"] = load_npz(os.path.join(input_dir, "train_features.npz"))
-    result["X_val"] = load_npz(os.path.join(input_dir, "val_features.npz"))
-    result["X_test"] = load_npz(os.path.join(input_dir, "test_features.npz"))
+    # Check if directory exists
+    if not os.path.exists(input_dir):
+        raise FileNotFoundError(f"Split directory {input_dir} not found")
     
-    # Load labels if available
-    if os.path.exists(os.path.join(input_dir, "train_labels.npy")):
-        result["y_train"] = np.load(os.path.join(input_dir, "train_labels.npy"))
-        result["y_val"] = np.load(os.path.join(input_dir, "val_labels.npy"))
-        result["y_test"] = np.load(os.path.join(input_dir, "test_labels.npy"))
+    # Load feature matrices with explicit error handling
+    try:
+        result["X_train"] = load_npz(os.path.join(input_dir, "train_features.npz"))
+        result["X_val"] = load_npz(os.path.join(input_dir, "val_features.npz"))
+        result["X_test"] = load_npz(os.path.join(input_dir, "test_features.npz"))
+    except Exception as e:
+        raise IOError(f"Failed to load feature matrices: {e}")
+    
+    # Try loading compressed labels first
+    try:
+        if os.path.exists(os.path.join(input_dir, "train_labels.npz")):
+            result["y_train"] = np.load(os.path.join(input_dir, "train_labels.npz"))["labels"]
+            result["y_val"] = np.load(os.path.join(input_dir, "val_labels.npz"))["labels"]
+            result["y_test"] = np.load(os.path.join(input_dir, "test_labels.npz"))["labels"]
+        # Fall back to .npy files
+        elif os.path.exists(os.path.join(input_dir, "train_labels.npy")):
+            result["y_train"] = np.load(os.path.join(input_dir, "train_labels.npy"))
+            result["y_val"] = np.load(os.path.join(input_dir, "val_labels.npy"))
+            result["y_test"] = np.load(os.path.join(input_dir, "test_labels.npy"))
+    except Exception as e:
+        logging.warning(f"Failed to load labels: {e}")
     
     # Load metadata if available
     if os.path.exists(os.path.join(input_dir, "train_metadata.csv")):
@@ -333,8 +347,10 @@ def main():
         logging.error(f"Failed to create directory {split_dir}: {e}")
         return
     
-    # Generate data fingerprint for versioning
-    data_fingerprint = hashlib.md5(pd.util.hash_pandas_object(metadata).values).hexdigest()
+    # Generate improved data fingerprint
+    metadata_hash = hashlib.md5(pd.util.hash_pandas_object(metadata).values).hexdigest()
+    feature_info = f"{X.shape}|{X.nnz}"
+    data_fingerprint = hashlib.md5((metadata_hash + feature_info).encode()).hexdigest()
     
     # Check if split already exists with requested proportions
     split_info_path = os.path.join(split_dir, "split_info.json")
@@ -374,9 +390,10 @@ def main():
     logging.info(f"Found {len(metadata)} samples with {X.shape[1]} features")
     logging.info(f"Countries represented: {len(encoder.classes_)}")
     
-    # Check if split is feasible
+    # Check if split is feasible with the same random_state as actual split
     try:
-        check_split_feasibility(y, test_size=test_size, val_size=val_size, min_samples_per_class=5)
+        check_split_feasibility(y, test_size=test_size, val_size=val_size, 
+                               min_samples_per_class=5, random_state=random_state)
     except ValueError as e:
         logging.error(f"Error: {e}")
         logging.error("Data split is not feasible with the current configuration.")
@@ -387,6 +404,11 @@ def main():
     X_train, X_val, X_test, y_train, y_val, y_test, idx_train, idx_val, idx_test = split_data(
         X, y, sample_ids, test_size=test_size, val_size=val_size, random_state=random_state, stratify=True
     )
+    
+    # Verify split sizes
+    if X_train.shape[0] == 0 or X_val.shape[0] == 0 or X_test.shape[0] == 0:
+        logging.error("One or more splits are empty. Check your split proportions.")
+        return
     
     # Report split sizes
     logging.info(f"Split sizes:")

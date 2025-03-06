@@ -174,7 +174,7 @@ def main():
         logging.info(f"Metadata columns: {list(sample_metadata.columns)}")
         
         # Filter for quality
-        quality_metadata = sample_metadata[sample_metadata["qc_pass"] == True].copy()
+        quality_metadata = sample_metadata[sample_metadata["QC pass"] == True].copy()
         logging.info(f"After quality filtering, {len(quality_metadata)} samples remain")
         
         # Get country distribution
@@ -200,7 +200,7 @@ def main():
         # Load variant data once
         logging.info("Loading variant calls...")
         variant_data = pf7.variant_calls(extended=False)
-        variant_data = variant_data.sel(sample=filtered_metadata.index)
+        variant_data = variant_data.sel(samples=filtered_metadata.index)
         
         # Get chromosome names to filter variants
         contig_info = pf7.genome_sequence().attrs["contigs"]
@@ -219,8 +219,8 @@ def main():
             chrom_variants = variant_data.sel(variant=mask)
             
             # Extract genotypes and convert to binary presence/absence
-            genotypes = chrom_variants["call_genotype"].data
-            variant_presence = (genotypes > 0).any(axis=2).astype(np.int8)  # Sparse-friendly
+            genotypes = chrom_variants["call_genotype"].data.compute()
+            variant_presence = (genotypes > 0).any(axis=2).astype(np.int8)
             variant_presence = sparse.csr_matrix(variant_presence.T)  # Transpose to samples x variants
             
             all_variant_features.append(variant_presence)
