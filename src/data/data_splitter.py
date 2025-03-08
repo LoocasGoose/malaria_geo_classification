@@ -48,7 +48,7 @@ def load_data():
     
     with open("data/processed/label_encoder.pkl", "rb") as f:
         encoder = pickle.load(f)
-    
+
     return metadata, X, y, sample_ids, encoder
 
 def split_data(features, labels, sample_ids, test_size=0.15, val_size=0.15, random_state=42, stratify=True):
@@ -264,7 +264,7 @@ def save_splits(output_dir, X_train, X_val, X_test, y_train, y_val, y_test,
     
     with open(os.path.join(output_dir, "split_info.json"), "w") as f:
         json.dump(split_info, f, indent=2)
-
+    
 def load_splits(input_dir):
     """
     Load previously created splits from disk with improved error handling.

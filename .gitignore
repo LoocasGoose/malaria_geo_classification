@@ -27,6 +27,10 @@ venv/
 data/raw/
 data/processed/
 logs/
+src/models/cnn_classifier_ultimate_README.md
+src/models/cnn_classifier_iterative_README.md
+src/data/fix_paths.py
+src/data/testing.py
 
 # Local Settings
 .env
