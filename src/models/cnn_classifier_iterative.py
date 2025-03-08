@@ -14,6 +14,7 @@ Output:
 
 import torch
 import torch.nn as nn
+from torch.nn.modules import loss
 import torch.optim as optim
 import os
 import logging
@@ -33,11 +34,19 @@ class DNACNN(nn.Module):
         
         super(DNACNN, self).__init__()
 
-        self.conv = nn.Conv1d(n_channels, 32, kernel_size=5, padding=2)
-        self.relu = nn.ReLU()
-        self.pool = nn.MaxPool1d(kernel_size=2, stride=2)
+        self.conv1 = nn.Conv1d(n_channels, 32, kernel_size=5, padding=2)
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        flatten_size = 32 * (seq_length // 2) * 32
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, padding=2)
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        self.conv3 = nn.Conv1d(64, 128, kernel_size=5, padding=2)
+        self.relu3 = nn.ReLU()  
+        self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
+
+        flatten_size = (seq_length // 8) * 128
         self.fc = nn.Linear(flatten_size, 128)
         self.fc_relu = nn.ReLU()
         self.output = nn.Linear(128, n_classes)
@@ -45,11 +54,21 @@ class DNACNN(nn.Module):
     def forward(self, x):
         """Forward pass of the DNA CNN model."""
 
-        x = x.permute(0, 2, 1)
-        x = self.conv(x)
-        x = self.relu(x)
-        x = self.pool(x)
-        x = self.flatten(x)
+        x = x.permute(0, 2, 1)  
+        x = self.conv1(x)
+        x = self.relu1(x)
+        x = self.pool1(x)
+
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = self.pool2(x)
+
+        x = self.conv3(x)
+        x = self.relu3(x)
+        x = self.pool3(x)
+
+        x = x.view(x.size(0), -1)
+
         x = self.fc(x)
         x = self.fc_relu(x)
         x = self.output(x)
@@ -80,7 +99,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, n_epochs=20, de
             optimizer.step()
 
             train_loss += loss.item() * sequences.size(0)
-            _, predicted = outputs.max(outputs, 1)
+            _, predicted = torch.max(outputs, 1)
             train_preds.extend(predicted.cpu().numpy())
             train_labels.extend(labels.cpu().numpy())
 
@@ -101,7 +120,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, n_epochs=20, de
                 loss = criterion(outputs, labels)
 
                 val_loss += loss.item() * sequences.size(0)
-                _, predicted = outputs.max(outputs, 1)
+                _, predicted = torch.max(outputs, 1)
                 val_preds.extend(predicted.cpu().numpy())
                 val_labels.extend(labels.cpu().numpy())
 
@@ -115,15 +134,19 @@ def train(model, train_loader, val_loader, criterion, optimizer, n_epochs=20, de
 
         logging.info(f"Epoch {epoch+1}/{n_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         
-        return model, history   
+    return model, history
 
-def evaluate(model, test_loader, device='cpu'):
+def evaluate(model, test_loader, criterion, device='cpu'):
     """Evaluate the DNA CNN model."""
 
     model.to(device)
     model.eval()
+    test_loss = 0.0
     test_preds = []
     test_labels = []
+
+    loss = criterion(outputs, labels)
+    test_loss += loss.item() * sequences.size(0)
 
     with torch.no_grad():
         for batch in test_loader:
@@ -131,7 +154,7 @@ def evaluate(model, test_loader, device='cpu'):
             labels = batch['label'].to(device)
 
             outputs = model(sequences)
-            _, predicted = outputs.max(outputs, 1)
+            _, predicted = torch.max(outputs, 1)
             test_preds.extend(predicted.cpu().numpy())
             test_labels.extend(labels.cpu().numpy())
 
