@@ -17,6 +17,7 @@ import json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+'''
 def load_sequence_data(fasta_path):
     """
     Load genomic sequences from FASTA file using memory-efficient parsing.
@@ -85,93 +86,94 @@ def extract_metadata(metadata):
     logging.info(f"Extracted relevent columns from original metadata")
     return metadata
 
-# def generate_kmers(sequences, k=6):
-#     """
-#     Generate k-mer frequency vectors from DNA sequences.
+def generate_kmers(sequences, k=6):
+    """
+    Generate k-mer frequency vectors from DNA sequences.
     
-#     Parameters:
-#         sequences (list): List of DNA sequences
-#         k (int): k-mer length
+    Parameters:
+        sequences (list): List of DNA sequences
+        k (int): k-mer length
         
-#     Returns:
-#         tuple: (sparse matrix of k-mer counts, vectorizer object)
-#     """
-#     # Check if sequences list is empty
-#     if not sequences:
-#         logging.error("Cannot generate k-mers: sequence list is empty")
-#         raise ValueError("Empty sequence list provided to generate_kmers")
+    Returns:
+        tuple: (sparse matrix of k-mer counts, vectorizer object)
+    """
+    # Check if sequences list is empty
+    if not sequences:
+        logging.error("Cannot generate k-mers: sequence list is empty")
+        raise ValueError("Empty sequence list provided to generate_kmers")
     
-#     # Log some info about the sequences
-#     logging.info(f"Generating {k}-mers from {len(sequences)} sequences")
-#     avg_length = sum(len(s) for s in sequences) / len(sequences)
-#     logging.info(f"Average sequence length: {avg_length:.2f}")
+    # Log some info about the sequences
+    logging.info(f"Generating {k}-mers from {len(sequences)} sequences")
+    avg_length = sum(len(s) for s in sequences) / len(sequences)
+    logging.info(f"Average sequence length: {avg_length:.2f}")
     
-#     # Dynamically set min_df based on dataset size
-#     # For small datasets, use absolute count, for larger use percentage
-#     if len(sequences) < 100:
-#         min_df_value = 2  # Minimum absolute count for very small datasets
-#     elif len(sequences) < 1000:
-#         min_df_value = max(2, int(0.01 * len(sequences)))  # 1% for small/medium datasets
-#     else:
-#         min_df_value = max(5, int(0.001 * len(sequences)))  # 0.1% for large datasets
+    # Dynamically set min_df based on dataset size
+    # For small datasets, use absolute count, for larger use percentage
+    if len(sequences) < 100:
+        min_df_value = 2  # Minimum absolute count for very small datasets
+    elif len(sequences) < 1000:
+        min_df_value = max(2, int(0.01 * len(sequences)))  # 1% for small/medium datasets
+    else:
+        min_df_value = max(5, int(0.001 * len(sequences)))  # 0.1% for large datasets
         
-#     logging.info(f"Using min_df={min_df_value} (k-mer must appear in at least {min_df_value} sequences)")
+    logging.info(f"Using min_df={min_df_value} (k-mer must appear in at least {min_df_value} sequences)")
     
-#     try:
-#         # Set max_features to prevent memory issues with very large datasets
-#         max_features = 100000 if len(sequences) > 5000 else None
+    try:
+        # Set max_features to prevent memory issues with very large datasets
+        max_features = 100000 if len(sequences) > 5000 else None
         
-#         vectorizer = CountVectorizer(
-#             analyzer='char',
-#             ngram_range=(k, k),
-#             lowercase=False,
-#             min_df=min_df_value,
-#             max_features=max_features
-#         )
+        vectorizer = CountVectorizer(
+            analyzer='char',
+            ngram_range=(k, k),
+            lowercase=False,
+            min_df=min_df_value,
+            max_features=max_features
+        )
 
-#         # Process in batches if the dataset is very large
-#         if len(sequences) > 10000 and avg_length > 1000:
-#             return _generate_kmers_batched(sequences, vectorizer)
-#         else:
-#             X_counts = vectorizer.fit_transform(sequences)
-#             logging.info(f"Generated {len(vectorizer.get_feature_names_out())} unique {k}-mers")
-#             return X_counts, vectorizer
+        # Process in batches if the dataset is very large
+        if len(sequences) > 10000 and avg_length > 1000:
+            return _generate_kmers_batched(sequences, vectorizer)
+        else:
+            X_counts = vectorizer.fit_transform(sequences)
+            logging.info(f"Generated {len(vectorizer.get_feature_names_out())} unique {k}-mers")
+            return X_counts, vectorizer
             
-#     except ValueError as e:
-#         logging.error(f"Error generating k-mers: {str(e)}")
-#         logging.info("Trying with min_df=1 (include all k-mers)")
-#         # Fallback to min_df=1 if the first attempt fails
-#         vectorizer = CountVectorizer(
-#             analyzer='char',
-#             ngram_range=(k, k),
-#             lowercase=False,
-#             min_df=1  # Include all k-mers
-#         )
-#         X_counts = vectorizer.fit_transform(sequences)
-#         logging.info(f"Generated {len(vectorizer.get_feature_names_out())} unique {k}-mers with min_df=1")
-#         return X_counts, vectorizer
+    except ValueError as e:
+        logging.error(f"Error generating k-mers: {str(e)}")
+        logging.info("Trying with min_df=1 (include all k-mers)")
+        # Fallback to min_df=1 if the first attempt fails
+        vectorizer = CountVectorizer(
+            analyzer='char',
+            ngram_range=(k, k),
+            lowercase=False,
+            min_df=1  # Include all k-mers
+        )
+        X_counts = vectorizer.fit_transform(sequences)
+        logging.info(f"Generated {len(vectorizer.get_feature_names_out())} unique {k}-mers with min_df=1")
+        return X_counts, vectorizer
 
-# def _generate_kmers_batched(sequences, vectorizer, batch_size=1000):
-#     """Process k-mers in batches to save memory for large datasets"""
-#     logging.info(f"Using batched k-mer generation with batch size {batch_size}")
+def _generate_kmers_batched(sequences, vectorizer, batch_size=1000):
+    """Process k-mers in batches to save memory for large datasets"""
+    logging.info(f"Using batched k-mer generation with batch size {batch_size}")
     
-#     # First fit on all sequences to get the vocabulary
-#     vectorizer.fit(sequences)
-#     feature_count = len(vectorizer.get_feature_names_out())
-#     logging.info(f"Vocabulary size: {feature_count} k-mers")
+    # First fit on all sequences to get the vocabulary
+    vectorizer.fit(sequences)
+    feature_count = len(vectorizer.get_feature_names_out())
+    logging.info(f"Vocabulary size: {feature_count} k-mers")
     
-#     # Then transform in batches
-#     result_parts = []
-#     for i in range(0, len(sequences), batch_size):
-#         batch = sequences[i:min(i+batch_size, len(sequences))]
-#         batch_counts = vectorizer.transform(batch)
-#         result_parts.append(batch_counts)
-#         if (i // batch_size) % 10 == 0:
-#             logging.info(f"Processed {i+len(batch)}/{len(sequences)} sequences")
+    # Then transform in batches
+    result_parts = []
+    for i in range(0, len(sequences), batch_size):
+        batch = sequences[i:min(i+batch_size, len(sequences))]
+        batch_counts = vectorizer.transform(batch)
+        result_parts.append(batch_counts)
+        if (i // batch_size) % 10 == 0:
+            logging.info(f"Processed {i+len(batch)}/{len(sequences)} sequences")
     
-#     # Combine results
-#     X_counts = sparse.vstack(result_parts)
-#     return X_counts, vectorizer
+    # Combine results
+    X_counts = sparse.vstack(result_parts)
+    return X_counts, vectorizer
+'''
 
 def apply_tfidf_batched(binary_matrix, batch_size=5000):
     """Apply TF-IDF transformation in batches to save memory"""
@@ -211,6 +213,7 @@ def encode_labels(labels, encoder = None):
     encoded_labels = encoder.transform(labels)
     return encoded_labels, encoder
 
+'''
 def cache_reference_genome():
     """Cache reference genome locally for faster access."""
     pf7 = malariagen_data.Pf7()
@@ -227,6 +230,7 @@ def cache_reference_genome():
         np.save(os.path.join(cache_dir, f"{chrom}.npy"), chrom_seq)
     
     logging.info(f"Reference genome cached in {cache_dir}")
+'''
 
 def main():
     # Create configuration with defaults that can be overridden
