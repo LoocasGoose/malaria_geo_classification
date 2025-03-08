@@ -26,6 +26,24 @@ from data.GenomicSequence import GenomicSequenceDataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def create_reverse_complement(x):
+    """Create the reverse complement of a DNA sequence"""
+    return x.reverse_complement()
+
+class StrandSymmetricConv(nn.Module):
+    """Strand-symmetric convolutional layer"""
+
+    def __init__(self, in_channels, out_channels, kernel_size, padding='same'):
+        super(StrandSymmetricConv, self).__init__()
+        
+class AttentionPooling(nn.Module):
+    """Attention pooling layer"""
+
+    def __init__(self, in_channels):
+        super(AttentionPooling, self).__init__()
+        
+      
+
 class DNACNN(nn.Module):
     """Basic Malaria DNA Analysis CNN Architecture"""
 
