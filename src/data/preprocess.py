@@ -86,6 +86,10 @@ def extract_metadata(metadata):
     logging.info(f"Extracted relevent columns from original metadata")
     return metadata
 
+    !!!
+    K-MER GENERATION IS NO LONGER USED BY CONVOLUTIONAL NEURAL NETWORK. 
+    !!!
+    
 def generate_kmers(sequences, k=6):
     """
     Generate k-mer frequency vectors from DNA sequences.

@@ -125,7 +125,7 @@ class PositionalEncoding(nn.Module):
         return torch.cat([x, pos_enc], dim=1)
 
 class AttentionPooling(nn.Module):
-    """Simple attention mechanism to focus on important sequence regions
+    """Attention mechanism to focus on important sequence regions
     
     DNA contains sparse functional elements - most of the sequence may be 
     less informative, while short motifs (e.g., binding sites) can be 

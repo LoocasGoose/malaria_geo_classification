@@ -12,6 +12,9 @@ Example Usage:
     model = DNACNN(n_classes=25)
     trainer = train(model, train_loader, val_loader, ...)
     evaluate(model, test_loader, ...)
+
+Please read the CNN_README.md file for more information on differences between
+this model and CNN_Classifier_v4.py. 
 """
 
 import os
@@ -29,11 +32,38 @@ from datetime import datetime
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, precision_score, recall_score
 from src.data.GenomicSequence import GenomicSequenceDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import math
+from src.evaluation.model_evaluator import create_html_report, create_heatmaps
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def create_reverse_complement(x):
+    """Create reverse complement of DNA sequences in one-hot encoding.
+    
+    Args:
+        x: One-hot encoded DNA tensor [batch, channels, seq_length]
+            Assumes channel order: A=0, C=1, G=2, T=3, N=4
+    
+    Returns:
+        Reverse complemented tensor of same shape
+    """
+    # Reverse the sequence
+    x_rev = torch.flip(x, dims=[2])
+    
+    # Swap complementary bases: A↔T (0↔3) and C↔G (1↔2)
+    # N (4) stays the same
+    x_comp = torch.zeros_like(x_rev)
+    x_comp[:, 0] = x_rev[:, 3]  # A gets T
+    x_comp[:, 1] = x_rev[:, 2]  # C gets G
+    x_comp[:, 2] = x_rev[:, 1]  # G gets C
+    x_comp[:, 3] = x_rev[:, 0]  # T gets A
+    x_comp[:, 4] = x_rev[:, 4]  # N stays N
+    
+    return x_comp
+
 
 class StrandSymmetricConv(nn.Module):
     """DNA strand-aware convolutional layer
@@ -57,19 +87,15 @@ class StrandSymmetricConv(nn.Module):
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding)
     
     def forward(self, x):
-        # Compute both forward and reverse-complement convolutions in one batch
         x_rc = create_reverse_complement(x)
-        both_x = torch.cat([x, x_rc], dim=0)
-        
-        # Run convolution once on combined batch
-        both_results = self.conv(both_x)
-        
-        # Split results back
-        x_fwd = both_results[:x.size(0)]
-        x_rev = both_results[x.size(0):]
-        x_rev = torch.flip(x_rev, dims=[2])  # Flip back
-        
-        return torch.max(x_fwd, x_rev)
+        # Process both strands in parallel using group convolution
+        combined = torch.cat([x, x_rc], dim=0)
+        conv_out = self.conv(combined)
+        # Split and align features
+        x_fwd, x_rev = torch.chunk(conv_out, 2, dim=0)
+        x_rev = torch.flip(x_rev, dims=[-1])  # Reverse back to original orientation
+        # Use mean instead of max for smoother equivariance
+        return (x_fwd + x_rev) / 2.0
 
 class PositionalEncoding(nn.Module):
     """Adds genomic position context to DNA sequences
@@ -80,15 +106,18 @@ class PositionalEncoding(nn.Module):
     Args:
         d_model: Number of positional encoding channels
         max_len: Maximum sequence length to handle
+        n_chromosomes: Number of different chromosomes to encode
     
     Input: 
         x: [batch, seq_len, channels] DNA sequence
         positions: [batch] Starting genomic positions
+        chromosomes: [batch] Chromosome identifiers
     Output: [batch, seq_len, channels + d_model] Enhanced sequence
     """
     
-    def __init__(self, d_model, max_len=10000):
+    def __init__(self, d_model, max_len=10000, n_chromosomes=14):
         super().__init__()
+        # Standard positional encoding
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
@@ -96,19 +125,49 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe)
         
-    def forward(self, x, positions):
+        # Chromosome-specific encoding
+        # Allows model to learn chromosome-specific patterns
+        self.chrom_embedding = nn.Embedding(n_chromosomes + 1, d_model // 4)  # +1 for unknown chromosome
+        
+    def forward(self, x, positions=None, chromosomes=None):
         """
         Args:
             x: Tensor [batch, seq_len, channels]
-            positions: Absolute genomic positions [batch]
+            positions: Absolute genomic positions [batch] or None
+            chromosomes: Chromosome identifiers [batch] or None
         """
-        # Get relative positions within the genome
         batch_size = x.size(0)
         seq_len = x.size(1)
         
-        # Add positional encoding as additional channels
-        pos_channels = self.pe[positions:positions+seq_len].unsqueeze(0).repeat(batch_size, 1, 1)
-        return torch.cat([x, pos_channels], dim=2)
+        # Default position if not provided
+        if positions is None:
+            positions = torch.zeros(batch_size, dtype=torch.long, device=x.device)
+            
+        # Default chromosome if not provided
+        if chromosomes is None:
+            chromosomes = torch.zeros(batch_size, dtype=torch.long, device=x.device)
+        
+        # Ensure positions are within bounds
+        positions = torch.clamp(positions, 0, self.pe.size(0) - seq_len)
+        
+        # Position-based encoding - choose the appropriate window for each sequence
+        pos_encodings = []
+        for i in range(batch_size):
+            pos_enc = self.pe[positions[i]:positions[i]+seq_len]
+            pos_encodings.append(pos_enc)
+        pos_encodings = torch.stack(pos_encodings, dim=0)
+        
+        # Chromosome-specific encoding
+        chrom_enc = self.chrom_embedding(chromosomes)  # [batch, d_model//4]
+        
+        # Expand chromosome encoding to match sequence length
+        chrom_enc = chrom_enc.unsqueeze(1).expand(-1, seq_len, -1)
+        
+        # Combine position and chromosome encodings
+        combined_encoding = torch.cat([pos_encodings, chrom_enc], dim=2)
+        
+        # Concatenate with original sequence data
+        return torch.cat([x, combined_encoding], dim=2)
 
 class AttentionPooling(nn.Module):
     """Focuses on key regions of DNA sequences
@@ -135,17 +194,109 @@ class AttentionPooling(nn.Module):
         attn_weights = self.attention(x)  # [batch, 1, seq_len]
         return torch.sum(x * attn_weights, dim=2)  # [batch, channels]
 
-class ResidualStrandConv(nn.Module):
-    """Add residual connections to StrandSymmetricConv."""
+class DenseResidualBlock(nn.Module):
+    """Enhanced residual block with dense connections and cross-layer features
     
-    def __init__(self, in_channels, out_channels, kernel_size, padding='same'):
+    Combines ideas from ResNet, DenseNet, and ResNeXt to improve gradient flow
+    and feature reuse across multiple scales and layers. Includes gating
+    mechanisms for dynamic feature selection.
+    
+    Args:
+        in_channels: Input channels
+        out_channels: Output channels
+        kernel_size: Convolution kernel size
+        cardinality: Number of groups for grouped convolution
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, cardinality=4):
         super().__init__()
-        self.conv = StrandSymmetricConv(in_channels, out_channels, kernel_size, padding)
-        self.residual = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-        self.bn = nn.BatchNorm1d(out_channels)
-            
-    def forward(self, x):
-        return F.relu(self.bn(self.conv(x) + self.residual(x)))
+        # Split processing into multiple paths (cardinality)
+        self.paths = nn.ModuleList()
+        path_channels = out_channels // cardinality
+        
+        for i in range(cardinality):
+            path = nn.Sequential(
+                StrandSymmetricConv(in_channels, path_channels, kernel_size, padding='same'),
+                nn.BatchNorm1d(path_channels),
+                nn.ReLU(),
+                StrandSymmetricConv(path_channels, path_channels, kernel_size//2 + 1, padding='same'),
+                nn.BatchNorm1d(path_channels),
+            )
+            self.paths.append(path)
+        
+        # Cross-path attention for information exchange
+        self.cross_path_attn = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Fusion layer to combine all features
+        total_channels = in_channels + out_channels
+        self.fusion = nn.Conv1d(total_channels, out_channels, 1)
+        self.bn_fusion = nn.BatchNorm1d(out_channels)
+        
+        # Edge connections (skip connections for remote layers)
+        # These will be used if this block is part of a sequence of blocks
+        self.edge_gate = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Final activation
+        self.relu = nn.ReLU()
+        
+    def forward(self, x, edge_input=None):
+        # First, process each path separately
+        path_outputs = []
+        for path in self.paths:
+            path_outputs.append(path(x))
+        
+        # Combine path outputs
+        path_combined = torch.cat(path_outputs, dim=1)
+        
+        # Apply cross-path attention
+        attn = self.cross_path_attn(path_combined)
+        path_combined = path_combined * attn
+        
+        # Include edge connection if provided
+        if edge_input is not None:
+            # Gate the edge input to control information flow
+            edge_importance = self.edge_gate(edge_input)
+            path_combined = path_combined + (edge_input * edge_importance)
+        
+        # Concatenate with original input (dense connection)
+        dense_out = torch.cat([x, path_combined], dim=1)
+        
+        # Fusion layer to get back to desired channel count
+        out = self.fusion(dense_out)
+        out = self.bn_fusion(out)
+        
+        return self.relu(out)
+
+class HierarchicalAttention(nn.Module):
+    """Applies attention at multiple scales and combines results
+    
+    Helps model focus on important features at different resolutions -
+    from small motifs to large genomic regions
+    
+    Args:
+        channel_sizes: List of channel dimensions from each conv layer
+    """
+    def __init__(self, channel_sizes):
+        super().__init__()
+        self.attention_layers = nn.ModuleList([
+            AttentionPooling(channels) for channels in channel_sizes
+        ])
+        self.fusion = nn.Linear(sum(channel_sizes), channel_sizes[-1])
+    
+    def forward(self, features):
+        # Apply attention at each resolution level
+        attention_outputs = []
+        for i, feature in enumerate(features):
+            attention_outputs.append(self.attention_layers[i](feature))
+        
+        # Concatenate and fuse multi-scale attention
+        combined = torch.cat(attention_outputs, dim=1)
+        return self.fusion(combined)
 
 class DNACNN(nn.Module):
     """Malaria DNA Analysis CNN Architecture
@@ -185,16 +336,22 @@ class DNACNN(nn.Module):
         
         # Input shape: [batch_size, 1, seq_length, n_channels]
         
-        # Convolutional layers
+        # Add positional encoding
+        # Use a smaller dimension for positional information to avoid overwhelming the sequence data
+        self.pos_encoding = PositionalEncoding(d_model=16, max_len=seq_length, n_chromosomes=14)
+        
+        # Convolutional layers with cross-layer connections
         self.conv_layers = nn.ModuleList()
         
-        # First conv layer takes input from n_channels
-        in_channels = n_channels
+        # First conv layer takes input from n_channels + positional channels
+        in_channels = n_channels + 16 + 4  # add 4 for chromosome embedding
+        
+        # Store intermediate outputs for cross-layer connections
+        self.cross_connections = []
+        
         for i, out_channels in enumerate(conv_channels):
             conv_layer = nn.Sequential(
-                ResidualStrandConv(in_channels, out_channels, kernel_sizes[i], padding=kernel_sizes[i]//2),
-                nn.BatchNorm1d(out_channels),
-                nn.ReLU(),
+                DenseResidualBlock(in_channels, out_channels, kernel_sizes[i], cardinality=4),
                 nn.MaxPool1d(kernel_size=2, stride=2)
             )
             self.conv_layers.append(conv_layer)
@@ -225,7 +382,7 @@ class DNACNN(nn.Module):
         self._initialize_weights()
         
         # Attention pooling
-        self.attn_pool = AttentionPooling(conv_channels[-1])
+        self.hierarchical_attn = HierarchicalAttention([32, 64, 128])
     
     def _initialize_weights(self):
         """Initialize network weights."""
@@ -241,24 +398,41 @@ class DNACNN(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
     
-    def forward(self, x):
+    def forward(self, x, positions=None, chromosomes=None):
         """Forward pass through the network.
         
         Args:
             x: Input tensor of shape [batch_size, seq_length, n_channels]
+            positions: Optional starting positions for sequences [batch_size]
+                      If None, assumes positions start at 0
+            chromosomes: Optional chromosome identifiers [batch_size]
+                        If None, assumes chromosome 0
         
         Returns:
             Tensor of shape [batch_size, n_classes]
         """
+        batch_size, seq_len, n_channels = x.shape
+        
+        # Apply positional encoding with chromosome information
+        if positions is None:
+            # If no specific positions provided, use simple sequencing from 0
+            positions = torch.zeros(batch_size, dtype=torch.long, device=x.device)
+        
+        # Apply positional encoding - first need to ensure proper shape
+        # [batch, seq_len, n_channels] -> add positional encoding -> [batch, seq_len, n_channels+d_model]
+        x = self.pos_encoding(x, positions, chromosomes)
+        
         # Rearrange input dimensions for 1D convolution: [batch, channels, length]
         x = x.permute(0, 2, 1)
         
         # Apply convolutional layers
+        features = []  # Store outputs from each conv layer
         for conv_layer in self.conv_layers:
             x = conv_layer(x)
+            features.append(x)
         
-        # Apply attention pooling
-        x = self.attn_pool(x)
+        # Apply hierarchical attention
+        x = self.hierarchical_attn(features)
         
         # Flatten
         x = x.view(x.size(0), -1)
@@ -302,42 +476,117 @@ def augment_sequence_with_rc(seq_tensor, p=0.5):
     return seq_tensor
 
 
-def create_reverse_complement(x):
-    """Create reverse complement of DNA sequences in one-hot encoding.
+def add_positional_noise(seq_tensor, p=0.02):
+    """Apply positional noise by shifting sequences slightly."""
+    if torch.rand(1).item() < 0.5:
+        # Only apply to some sequences in batch
+        batch_size = seq_tensor.shape[0]
+        # Decide which sequences to modify
+        mask = torch.rand(batch_size) < p
+        if not mask.any():
+            return seq_tensor
+            
+        # Make a copy to modify
+        new_tensor = seq_tensor.clone()
+        
+        # For each selected sequence, shift by -1, 0, or 1
+        for i in range(batch_size):
+            if mask[i]:
+                shift = torch.randint(-1, 2, (1,)).item()
+                if shift != 0:
+                    # Shift the sequence left or right
+                    new_tensor[i] = torch.roll(new_tensor[i], shifts=shift, dims=0)
+                    
+                    # Fill in the wrapped values with N (position 4)
+                    if shift > 0:
+                        new_tensor[i, :shift, :] = 0
+                        new_tensor[i, :shift, 4] = 1  # N base
+                    else:
+                        new_tensor[i, shift:, :] = 0
+                        new_tensor[i, shift:, 4] = 1  # N base
+                        
+        return new_tensor
+    return seq_tensor
+
+
+def simulate_variants(seq_tensor, p_snp=0.01, p_ins=0.005, p_del=0.005):
+    """Simulate genomic variants (SNPs, insertions, deletions) in sequences.
     
     Args:
-        x: One-hot encoded DNA tensor [batch, channels, seq_length]
-            Assumes channel order: A=0, C=1, G=2, T=3, N=4
-    
+        seq_tensor: One-hot encoded DNA tensor [batch, seq_len, channels]
+        p_snp: Probability of introducing a SNP at any position
+        p_ins: Probability of introducing an insertion at any position
+        p_del: Probability of introducing a deletion at any position
+        
     Returns:
-        Reverse complemented tensor of same shape
+        Tensor with simulated variants
     """
-    # Reverse the sequence
-    x_rev = torch.flip(x, dims=[2])
+    if torch.rand(1).item() > 0.3:  # Only apply to ~30% of batches
+        return seq_tensor
+        
+    batch_size, seq_len, n_channels = seq_tensor.shape
+    result = seq_tensor.clone()
     
-    # Swap complementary bases: A↔T (0↔3) and C↔G (1↔2)
-    # N (4) stays the same
-    x_comp = torch.zeros_like(x_rev)
-    x_comp[:, 0] = x_rev[:, 3]  # A gets T
-    x_comp[:, 1] = x_rev[:, 2]  # C gets G
-    x_comp[:, 2] = x_rev[:, 1]  # G gets C
-    x_comp[:, 3] = x_rev[:, 0]  # T gets A
-    x_comp[:, 4] = x_rev[:, 4]  # N stays N
+    # Process each sequence in the batch
+    for b in range(batch_size):
+        # 1. Simulate SNPs (substitutions)
+        if p_snp > 0:
+            # Create a mask for positions to modify
+            snp_mask = torch.rand(seq_len) < p_snp
+            snp_positions = torch.nonzero(snp_mask).squeeze(-1)
+            
+            for pos in snp_positions:
+                # Get current base (argmax of one-hot encoding)
+                current_base = torch.argmax(seq_tensor[b, pos]).item()
+                if current_base == 4:  # Don't modify N bases
+                    continue
+                    
+                # Choose a different base (excluding N)
+                new_base = torch.randint(0, 4, (1,)).item()
+                while new_base == current_base:
+                    new_base = torch.randint(0, 4, (1,)).item()
+                
+                # Update the one-hot encoding
+                result[b, pos] = torch.zeros(n_channels)
+                result[b, pos, new_base] = 1.0
+                
+        # 2. Simulate deletions
+        if p_del > 0:
+            # Choose positions for deletions
+            del_mask = torch.rand(seq_len) < p_del
+            del_positions = torch.nonzero(del_mask).squeeze(-1)
+            
+            for pos in del_positions:
+                # Skip if too close to the end
+                if pos >= seq_len - 1:
+                    continue
+                
+                # Shift sequence to simulate deletion
+                result[b, pos:-1] = result[b, pos+1:].clone()
+                # Fill the end with N
+                result[b, -1] = torch.zeros(n_channels)
+                result[b, -1, 4] = 1.0  # N base
+                
+        # 3. Simulate insertions
+        if p_ins > 0:
+            # Choose positions for insertions
+            ins_mask = torch.rand(seq_len) < p_ins
+            ins_positions = torch.nonzero(ins_mask).squeeze(-1)
+            
+            for pos in reversed(ins_positions):  # Process in reverse to avoid position shifting
+                # Skip if too close to the end
+                if pos >= seq_len - 1:
+                    continue
+                    
+                # Shift sequence to make room for insertion
+                result[b, pos+1:] = result[b, pos:-1].clone()
+                
+                # Choose a random base to insert (A, C, G, or T)
+                new_base = torch.randint(0, 4, (1,)).item()
+                result[b, pos] = torch.zeros(n_channels)
+                result[b, pos, new_base] = 1.0
     
-    return x_comp
-
-
-def add_positional_noise(seq_tensor, p=0.02):
-    """Add small random shifts to simulate sequencing errors."""
-    if torch.rand(1).item() < 0.5:
-        shift = torch.randint(-2, 3, (1,)).item()
-        if shift > 0:
-            # Shift right
-            seq_tensor = torch.cat([torch.zeros_like(seq_tensor[:,:shift]), seq_tensor[:,:-shift]], dim=1)
-        elif shift < 0:
-            # Shift left
-            seq_tensor = torch.cat([seq_tensor[:,-shift:], torch.zeros_like(seq_tensor[:,:shift])], dim=1)
-    return seq_tensor
+    return result
 
 
 class EarlyStopping:
@@ -378,29 +627,31 @@ class EarlyStopping:
 
 def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None, n_epochs=30, 
           device='cuda', model_dir='models', early_stopping_patience=5, mixed_precision=True):
-    """Trains the malaria origin classifier
+    """Train a genomic CNN model with advanced techniques.
     
-    Implements DNA-specific training with:
-    - Automatic mixed precision for faster training
+    This training function incorporates:
+    - Early stopping to prevent overfitting
     - Learning rate scheduling
-    - Early stopping
-    - Model checkpointing
+    - Mixed precision for faster training
+    - Checkpointing to save best models
+    - Comprehensive metrics tracking
+    - Data augmentation including variant simulation
     
     Args:
-        model: Initialized DNACNN model
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        criterion: Loss function (use LabelSmoothingCrossEntropy)
-        optimizer: Optimizer (recommend AdamW)
+        model: Neural network model to train
+        train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data
+        criterion: Loss function
+        optimizer: Optimization algorithm
         scheduler: Learning rate scheduler
-        n_epochs: Maximum training epochs
-        device: cuda/cpu
-        model_dir: Save directory for checkpoints
-        early_stopping_patience: Stop after N epochs without improvement
+        n_epochs: Maximum number of training epochs
+        device: Device to train on ('cuda' or 'cpu')
+        model_dir: Directory to save model checkpoints
+        early_stopping_patience: Epochs to wait before stopping
         mixed_precision: Use GPU acceleration (recommended)
-    
+        
     Returns:
-        Trained model, training history dictionary
+        dict: Training history with metrics
     """
     # Create model directory
     os.makedirs(model_dir, exist_ok=True)
@@ -425,7 +676,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
     )
     
     # Initialize gradient scaler for mixed precision
-    scaler = GradScaler() if mixed_precision and device == 'cuda' else None
+    scaler = GradScaler('cuda') if mixed_precision and device == 'cuda' else None
     
     # Get current timestamp for model naming
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -458,14 +709,17 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
                 # Zero gradients
                 optimizer.zero_grad()
                 
+                # Apply data augmentation with variant simulation
+                if training_mode == 'train':
+                    # Apply sequence augmentations
+                    sequences = augment_sequence(sequences)
+                    sequences = augment_sequence_with_rc(sequences)
+                    sequences = add_positional_noise(sequences)
+                    sequences = simulate_variants(sequences, p_snp=0.01, p_ins=0.005, p_del=0.005)
+                
                 # Mixed precision forward pass
                 if mixed_precision and device == 'cuda':
                     with autocast():
-                        # Enhanced augmentation
-                        sequences = augment_sequence(sequences, p=0.1)  # Increased masking
-                        sequences = augment_sequence_with_rc(sequences, p=0.5)
-                        sequences = add_positional_noise(sequences)  # New augmentation
-                        
                         outputs = model(sequences)
                         loss = criterion(outputs, labels)
                     
@@ -478,8 +732,6 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
                     scaler.update()
                 else:
                     # Original code path
-                    sequences = augment_sequence(sequences)
-                    # Missing RC augmentation here!
                     outputs = model(sequences)
                     loss = criterion(outputs, labels)
                 
@@ -625,66 +877,173 @@ def evaluate(model, test_loader, criterion, device):
     return metrics
 
 
-def visualize_attention(model, test_loader, device, n_samples=5):
-    """Generates interpretable examples of model decisions
+def visualize_genome_regions(model, test_loader, device, output_dir='metrics'):
+    """Generates comprehensive genomic region visualizations
     
-    Outputs:
-    - Example DNA sequences
-    - True vs predicted labels
-    - Attention weights (which regions influenced decisions)
+    This visualization function helps identify which parts of the genome
+    are most important for classification decisions by:
+    
+    1. Tracking attention weights across the sequence
+    2. Generating saliency maps showing input importance
+    3. Highlighting potential binding motifs or functional regions
+    4. Comparing activations across different genomic contexts
+    5. Creating interactive visualizations for exploration
     
     Args:
-        model: Trained DNACNN
-        test_loader: Test data loader
-        device: cuda/cpu
-        n_samples: Number of examples to save
-    
-    Saves 'sequence_samples.json' with visualization data
-    """
-    model.eval()
-    samples = []
-    
-    with torch.no_grad():
-        for batch in test_loader:
-            sequences = batch['sequence'].to(device)
-            labels = batch['label'].to(device)
-            regions = batch['region']
-            
-            # Forward pass
-            outputs = model(sequences)
-            _, predicted = torch.max(outputs, 1)
-            
-            # Get activation maps from the last convolutional layer
-            # (Would need to modify model to extract these)
-            
-            # For now, just collect sample sequences for visualization
-            for i in range(min(n_samples, sequences.size(0))):
-                if len(samples) >= n_samples:
-                    break
-                    
-                # Convert one-hot to readable sequence
-                seq_array = sequences[i].cpu().numpy()
-                bases = ["A", "C", "G", "T", "N"]
-                seq_string = ""
-                for pos in range(seq_array.shape[0]):
-                    base_idx = np.argmax(seq_array[pos])
-                    seq_string += bases[base_idx]
-                
-                samples.append({
-                    'sequence': seq_string[:50] + "...",  # First 50 bases
-                    'region': regions[i],
-                    'true_label': labels[i].item(),
-                    'predicted': predicted[i].item()
-                })
-            
-            if len(samples) >= n_samples:
-                break
-    
-    # Save visualization data
-    with open('metrics/sequence_samples.json', 'w') as f:
-        json.dump(samples, f, indent=2)
+        model: Trained model with hierarchical attention
+        test_loader: DataLoader with test sequences
+        device: Computing device
+        output_dir: Directory to save visualizations
         
-    return samples
+    Returns:
+        Path to HTML report with interactive visualizations
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    model.eval()
+    model.to(device)
+    
+    # Get a small batch of data
+    for batch in test_loader:
+        sequences = batch['sequence'].to(device)
+        labels = batch['label'].to(device)
+        sample_ids = batch.get('sample_id', None)
+        positions = batch.get('position', None)
+        chromosomes = batch.get('chromosome', None)
+        break
+    
+    # Set up attention hooks to capture attention weights
+    attention_weights = []
+    
+    def get_attn_weights(name):
+        def hook(module, input, output):
+            # Reshape attention to [batch, seq_len]
+            if isinstance(output, tuple):
+                # Some layers return multiple outputs
+                attn = output[1]
+            else:
+                attn = output
+            attention_weights.append(attn.detach().cpu().numpy())
+        return hook
+    
+    # Register hook for attention layers if using hierarchical attention
+    if hasattr(model, 'hierarchical_attn'):
+        for i, attn in enumerate(model.hierarchical_attn.attention_layers):
+            attn.attention[0].register_forward_hook(get_attn_weights(f'attn_{i}'))
+    
+    # Calculate gradients for saliency maps
+    handles = []
+    
+    # Store activations at different layers
+    activations = []
+    
+    def get_activations(name):
+        def hook(module, input, output):
+            activations.append((name, output.detach().cpu()))
+        return hook
+    
+    # Register hooks for key layers
+    for i, layer in enumerate(model.conv_layers):
+        handles.append(layer[0].relu.register_forward_hook(
+            get_activations(f'conv_{i}')))
+    
+    # Advanced: Track feature maps from different layers
+    feature_maps = {}
+    
+    def get_feature_maps(name):
+        def hook(module, input, output):
+            # Keep only the first few channels to avoid memory issues
+            feature_maps[name] = output[:, :5, :].detach().cpu()
+        return hook
+    
+    # Register hooks for feature maps
+    for i, layer in enumerate(model.conv_layers):
+        layer[0].register_forward_hook(get_feature_maps(f'features_{i}'))
+    
+    # Forward pass
+    outputs = model(sequences, positions, chromosomes)
+    predictions = torch.argmax(outputs, dim=1)
+    
+    # Generate CAM (Class Activation Mapping) heatmaps
+    # This technique reveals the important regions in the input for classification
+    logits = outputs
+    
+    # Get weights from the last layer
+    last_conv_layer = model.conv_layers[-1][0]
+    weights = model.output_layer.weight.detach().cpu().numpy()
+    
+    # Generate saliency maps - which input positions are most important?
+    sequences.requires_grad_(True)
+    model.zero_grad()
+    
+    # One-hot for true class
+    outputs = model(sequences, positions, chromosomes)
+    true_class_outputs = outputs.gather(1, labels.view(-1, 1)).squeeze()
+    true_class_outputs.backward(torch.ones_like(true_class_outputs))
+    
+    # Get gradients
+    saliency = sequences.grad.abs().sum(dim=2)
+    saliency = saliency.detach().cpu().numpy()
+    
+    # Original sequence data
+    orig_sequences = batch['sequence'].cpu().numpy()
+    
+    # Create directory for the visualizations
+    vis_dir = os.path.join(output_dir, 'genome_vis')
+    os.makedirs(vis_dir, exist_ok=True)
+    
+    # Generate HTML report with multiple visualization types
+    html_path = os.path.join(vis_dir, 'genome_regions.html')
+    
+    # Enhanced feature: Extract motifs from high-attention regions
+    # This helps identify binding sites or functional elements
+    motifs = []
+    
+    # Find high-attention regions
+    if attention_weights:
+        attn = attention_weights[-1]  # Use the last attention layer
+        attn = attn.reshape(attn.shape[0], -1)
+        
+        for i in range(min(5, attn.shape[0])):  # For up to 5 sequences
+            # Find top attention positions
+            top_indices = np.argsort(attn[i])[-10:]
+            
+            # Extract 10bp around each position, if available
+            for idx in top_indices:
+                if idx * 4 < orig_sequences.shape[1] - 10:  # Adjust for pooling layers
+                    start = idx * 4
+                    end = start + 10
+                    # Convert one-hot back to sequence
+                    seq_region = orig_sequences[i, start:end]
+                    bases = ['A', 'C', 'G', 'T', 'N']
+                    motif = ''.join([bases[np.argmax(pos)] for pos in seq_region])
+                    motifs.append(motif)
+    
+    # Generate HTML report with multiple views
+    html_report = create_html_report(
+        sequences=orig_sequences[:5],  # First 5 sequences
+        attention_weights=attention_weights,
+        saliency_maps=saliency[:5],
+        feature_maps={k: v[:5] for k, v in feature_maps.items()},
+        predictions=predictions[:5].cpu().numpy(),
+        true_labels=labels[:5].cpu().numpy(),
+        sample_ids=sample_ids[:5] if sample_ids is not None else None,
+        motifs=motifs,
+        output_path=html_path
+    )
+    
+    # Create heatmaps showing neuron activations
+    heatmap_path = os.path.join(vis_dir, 'activation_heatmaps.png')
+    create_heatmaps(activations, heatmap_path)
+    
+    # Clean up hooks
+    for handle in handles:
+        handle.remove()
+    
+    logging.info(f"Generated genome region visualizations at {vis_dir}")
+    
+    return html_path
 
 
 def get_batch_size(device):
@@ -787,7 +1146,7 @@ def main():
     criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
     
     # Create model
-    model = DNACNN(
+    model_symmetric = DNACNN(
         n_classes=n_classes,
         seq_length=window_size,
         n_channels=5,  # A, C, G, T, N
@@ -800,18 +1159,18 @@ def main():
     # Add multi-GPU support
     if torch.cuda.device_count() > 1:
         logging.info(f"Using {torch.cuda.device_count()} GPUs!")
-        model = nn.DataParallel(model)
+        model_symmetric = nn.DataParallel(model_symmetric)
     
     # Define optimizer
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)  # Increased weight decay
+    optimizer = optim.AdamW(model_symmetric.parameters(), lr=0.001, weight_decay=1e-4)  # Increased weight decay
     
     # Learning rate scheduler
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
     
     # Training
     logging.info("Starting training...")
-    model, history = train(
-        model=model,
+    model_symmetric, history = train(
+        model=model_symmetric,
         train_loader=train_loader,
         val_loader=val_loader,
         criterion=criterion,
@@ -827,14 +1186,66 @@ def main():
     # Evaluation
     logging.info("Evaluating model on test set...")
     metrics = evaluate(
-        model=model,
+        model=model_symmetric,
         test_loader=test_loader,
         criterion=criterion,
         device=device
     )
     
     # Visualize attention
-    visualize_attention(model, test_loader, device)
+    visualize_genome_regions(model_symmetric, test_loader, device)
+    
+    logging.info("Training and evaluation complete!")
+
+    # Without equivariance
+    model_standard = DNACNN(
+        n_classes=n_classes,
+        seq_length=window_size,
+        n_channels=5,  # A, C, G, T, N
+        conv_channels=[64, 128, 256],
+        kernel_sizes=[15, 9, 5],
+        fc_sizes=[1024, 512],
+        dropout=0.4
+    )
+    
+    # Add multi-GPU support
+    if torch.cuda.device_count() > 1:
+        logging.info(f"Using {torch.cuda.device_count()} GPUs!")
+        model_standard = nn.DataParallel(model_standard)
+    
+    # Define optimizer
+    optimizer = optim.AdamW(model_standard.parameters(), lr=0.001, weight_decay=1e-4)  # Increased weight decay
+    
+    # Learning rate scheduler
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+    
+    # Training
+    logging.info("Starting training without equivariance...")
+    model_standard, history = train(
+        model=model_standard,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        n_epochs=30,
+        device=device,
+        model_dir='models',
+        early_stopping_patience=5,
+        mixed_precision=True
+    )
+    
+    # Evaluation
+    logging.info("Evaluating model on test set without equivariance...")
+    metrics = evaluate(
+        model=model_standard,
+        test_loader=test_loader,
+        criterion=criterion,
+        device=device
+    )
+    
+    # Visualize attention
+    visualize_genome_regions(model_standard, test_loader, device)
     
     logging.info("Training and evaluation complete!")
 
