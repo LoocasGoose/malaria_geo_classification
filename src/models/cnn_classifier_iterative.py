@@ -14,6 +14,7 @@ Output:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.modules import loss
 import torch.optim as optim
 import os
@@ -81,6 +82,48 @@ class StrandSymmetricConv(nn.Module):
         # Take maximum activation from either strand
         return torch.max(x_fwd, torch.flip(x_rev, dims=[2]))
 
+class PositionalEncoding(nn.Module):
+    """Adds positional encoding to the input sequence.
+    
+    Args:
+        d_model: Dimension of the model
+        max_len: Maximum length of the sequence
+    """
+    def __init__(self, d_model, max_len=2000):
+        super().__init__()
+        # Create constant positional encoding matrix
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        # Apply sine to even indices
+        pe[:, 0::2] = torch.sin(position * div_term)
+        # Apply cosine to odd indices
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        # Register as buffer (not a parameter)
+        self.register_buffer('pe', pe)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor [batch, channels, seq_len]
+        Returns:
+            Tensor with positional encoding added [batch, channels+d_model, seq_len]
+        """
+        # Get sequence length
+        seq_len = x.size(2)
+        batch_size = x.size(0)
+        
+        # Get positional encoding for this sequence length
+        pos_enc = self.pe[:seq_len, :].transpose(0, 1).unsqueeze(0)
+        
+        # Expand to batch size
+        pos_enc = pos_enc.expand(batch_size, -1, -1)
+        
+        # Concatenate along channel dimension
+        return torch.cat([x, pos_enc], dim=1)
+
 class AttentionPooling(nn.Module):
     """Simple attention mechanism to focus on important sequence regions
     
@@ -101,80 +144,152 @@ class AttentionPooling(nn.Module):
         attn_weights = self.attention(x)  # [batch, 1, seq_len]
         return torch.sum(x * attn_weights, dim=2)  # [batch, channels]
 
+class ResidualStrandConv(nn.Module):
+    """Residual block with strand-symmetric convolution
+    
+    Combines residual connections with strand symmetry for stable
+    training of deeper networks.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, dropout=0.3):
+        super().__init__()
+        self.conv = StrandSymmetricConv(in_channels, out_channels, kernel_size, padding='same')
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        
+        # Skip connection (if dimensions don't match)
+        self.skip = None
+        if in_channels != out_channels:
+            self.skip = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+    
+    def forward(self, x):
+        # Main path
+        residual = x
+        out = self.conv(x)
+        out = self.bn(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        
+        # Skip connection
+        if self.skip is not None:
+            residual = self.skip(x)
+        
+        # Add residual connection
+        out += residual
+        return self.relu(out)
+
+class LabelSmoothingLoss(nn.Module):
+    """Label smoothing cross entropy loss
+    
+    Adds regularization by preventing model from becoming too confident.
+    """
+    def __init__(self, smoothing=0.1, classes=10):
+        super().__init__()
+        self.smoothing = smoothing
+        self.classes = classes
+    
+    def forward(self, pred, target):
+        # Convert to log probabilities
+        log_probs = F.log_softmax(pred, dim=-1)
+        
+        # Create one-hot encoding
+        with torch.no_grad():
+            target_one_hot = torch.zeros_like(pred)
+            target_one_hot.scatter_(1, target.unsqueeze(1), 1.0)
+        
+        # Apply label smoothing
+        target_smooth = target_one_hot * (1.0 - self.smoothing) + self.smoothing / self.classes
+        
+        # Calculate loss
+        return -torch.sum(target_smooth * log_probs, dim=1).mean()
+
 class DNACNN(nn.Module):
-    """Version 3: Biologically-aware CNN Architecture
+    """Version 4: Advanced CNN Architecture with Residual Connections
     
     Features:
+    - Residual connections for gradient flow
+    - Batch normalization for training stability
+    - Positional encoding for genomic context
+    - Dropout layers for regularization
     - Strand-symmetric convolutions for biological relevance
     - Attention mechanism to focus on important regions
-    - Deeper architecture with three convolutional layers
     """
 
-    def __init__(self, n_classes, seq_length=1000, n_channels=5):
+    def __init__(self, n_classes, seq_length=1000, n_channels=5, dropout=0.3):
         """Initialize the DNA CNN model."""
         
         super(DNACNN, self).__init__()
-
-        # Strand-symmetric convolutional layers
-        self.conv1 = StrandSymmetricConv(n_channels, 32, kernel_size=5, padding='same')
-        self.bn1 = nn.BatchNorm1d(32)
-        self.relu1 = nn.ReLU()
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(d_model=64, max_len=2000)
+        
+        # Input channels will be augmented with positional encoding
+        augmented_channels = n_channels + 64
+        
+        # Residual convolution blocks with batch norm and dropout
+        self.conv1 = ResidualStrandConv(augmented_channels, 32, kernel_size=5, dropout=dropout)
         self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        self.conv2 = StrandSymmetricConv(32, 64, kernel_size=5, padding='same')
-        self.bn2 = nn.BatchNorm1d(64)
-        self.relu2 = nn.ReLU()
+        self.conv2 = ResidualStrandConv(32, 64, kernel_size=5, dropout=dropout)
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        self.conv3 = StrandSymmetricConv(64, 128, kernel_size=5, padding='same')
-        self.bn3 = nn.BatchNorm1d(128)
-        self.relu3 = nn.ReLU()  
+        self.conv3 = ResidualStrandConv(64, 128, kernel_size=5, dropout=dropout)
         self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
         
         # Attention pooling
         self.attention = AttentionPooling(128)
 
-        # Calculate flattened size (will be different with attention)
-        self.fc = nn.Linear(128, 128)  # Attention outputs [batch, channels]
-        self.fc_relu = nn.ReLU()
+        # Fully connected layers with dropout
+        self.fc1 = nn.Linear(128, 512)
+        self.fc_relu1 = nn.ReLU()
+        self.fc_dropout1 = nn.Dropout(dropout)
+        
+        self.fc2 = nn.Linear(512, 128)
+        self.fc_relu2 = nn.ReLU()
+        self.fc_dropout2 = nn.Dropout(dropout)
+        
         self.output = nn.Linear(128, n_classes)
 
     def forward(self, x):
-        """Forward pass with strand-symmetric convolutions and attention."""
+        """Forward pass with positional encoding, residual blocks, and attention."""
 
-        x = x.permute(0, 2, 1)  
+        # Rearrange for 1D convolution
+        x = x.permute(0, 2, 1)
         
-        # First conv block
+        # Add positional encoding
+        x = self.pos_encoder(x)
+        
+        # First conv block with residual connection
         x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu1(x)
         x = self.pool1(x)
 
-        # Second conv block
+        # Second conv block with residual connection
         x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu2(x)
         x = self.pool2(x)
 
-        # Third conv block
+        # Third conv block with residual connection
         x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.relu3(x)
         x = self.pool3(x)
 
-        # Apply attention pooling instead of flatten
+        # Apply attention pooling
         x = self.attention(x)
         
-        # Fully connected layers (no need for view/flatten)
-        x = self.fc(x)
-        x = self.fc_relu(x)
+        # Fully connected layers with dropout
+        x = self.fc1(x)
+        x = self.fc_relu1(x)
+        x = self.fc_dropout1(x)
+        
+        x = self.fc2(x)
+        x = self.fc_relu2(x)
+        x = self.fc_dropout2(x)
+        
         x = self.output(x)
 
         return x
     
 def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None, 
-          n_epochs=30, device='cpu', early_stopping_patience=5):
-    """Train the DNA CNN model with early stopping and LR scheduling."""
+          n_epochs=30, device='cpu', early_stopping_patience=5, grad_clip_val=1.0):
+    """Train the DNA CNN model with gradient clipping and early stopping."""
 
     model.to(device)
     history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
@@ -200,6 +315,10 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
             loss = criterion(outputs, labels)
 
             loss.backward()
+            
+            # Add gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_val)
+            
             optimizer.step()
 
             train_loss += loss.item() * sequences.size(0)
@@ -330,36 +449,38 @@ def main():
     logging.info(f"Number of classes: {n_classes}")
     logging.info(f"Training samples: {len(train_dataset)}")
 
-    model = DNACNN(n_classes=n_classes, seq_length=1000, n_channels=5)
+    model = DNACNN(n_classes=n_classes, seq_length=1000, n_channels=5, dropout=0.3)
     logging.info(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters")
 
-    criterion = nn.CrossEntropyLoss()
+    # Use label smoothing loss for regularization
+    criterion = LabelSmoothingLoss(smoothing=0.1, classes=n_classes)
     
-    # Use Adam optimizer instead of SGD
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    # Use Adam optimizer
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
     
     # Add learning rate scheduler
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 
     try:
-        # Train with early stopping and LR scheduling
+        # Train with early stopping, LR scheduling, and gradient clipping
         model, history = train(
-            model=model, 
-            train_loader=train_loader, 
-            val_loader=val_loader, 
-            criterion=criterion, 
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
             optimizer=optimizer,
             scheduler=scheduler,
             n_epochs=30,
             device=device,
-            early_stopping_patience=5
+            early_stopping_patience=5,
+            grad_clip_val=1.0  # Add gradient clipping
         )
         
         # Evaluate on test set
         test_acc, test_loss = evaluate(
-            model=model, 
-            test_loader=test_loader, 
-            criterion=criterion, 
+            model=model,
+            test_loader=test_loader,
+            criterion=criterion,
             device=device
         )
         
@@ -371,8 +492,8 @@ def main():
             'history': history,
             'test_acc': test_acc,
             'test_loss': test_loss
-        }, "models/cnn_v3.pt")
-        logging.info(f"Model saved to models/cnn.pt")
+        }, "models/cnn_v4.pt")
+        logging.info(f"Model saved to models/cnn_v4.pt")
         
     except Exception as e:
         logging.error(f"Error during training: {str(e)}")
