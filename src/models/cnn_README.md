@@ -7,10 +7,9 @@
 
 **cnn_standard.py** was the *first final version* of the model. It works, but I wanted to try out new features. Some are complicated (to me), some are just ideas I had that I want to play around with. So I made a copy, now **cnn_advanced.py**, and experimented. 
 
-### Key Enhancements in Advanced Version
+### Key Enhancements in Advanced Version (Standard ➞ Advanced)
 
-Standard ➞ Advanced
-1. Basic skip connections (`ResidualStrandConv`) ➞ `DenseResidualBlock` (used concepts from ResNet, DenseNet, and ResNeXt with cardinality for better gradient flow and feature reuse) 
+1. Basic skip connections (`ResidualStrandConv`) ➞ `DenseResidualBlock` (used concepts from **ResNet**, **DenseNet**, and **ResNeXt** with **cardinality** for better gradient flow and feature reuse) 
 2. Single layer `AttentionPooling` ➞ `HierarchicalAttention` (apply attention to multiple layers) 
 3. Simple positional encoding (max_len=2000) ➞ Added chromosome-awareness (`PositionalEncoding`, n_chromosomes=14) and larger context window (max_len=10000) 
 4. No variant simulation ➞ Added `simulate_variants` function to model SNPs, insertions, and deletions 
@@ -18,6 +17,7 @@ Standard ➞ Advanced
     - `augment_sequence` - general sequence mutation
     - `augment_sequence_with_rc` - improved reverse complement handling
     - `add_positional_noise` - simulates sequencing errors 
+6. Simple averaging weights `StrandSymmetricConv` ➞ Learnable weights to combine information from forward and reverse strands, better detect strand-biased patterns
 
 ### Additional Improvements
 - Mixed precision training
@@ -197,6 +197,7 @@ Key improvements:
 - Hierarchical attention mechanism
 - Advanced region visualization
 - Complex skip connections
+- Learnable weights
 
 ```
                       [Input: DNA Seq]

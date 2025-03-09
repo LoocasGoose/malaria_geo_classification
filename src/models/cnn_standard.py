@@ -1,5 +1,5 @@
 '''
-cnn_classifier_iterative.py
+    cnn_standard.py
 ~~~~~~~~~~
 
 Purpose: 
@@ -204,7 +204,7 @@ class LabelSmoothingLoss(nn.Module):
         return -torch.sum(target_smooth * log_probs, dim=1).mean()
 
 class DNACNN(nn.Module):
-    """Version 4: Advanced CNN Architecture with Residual Connections
+    """Standard CNN Architecture with Residual Connections
     
     Features:
     - Residual connections for gradient flow
@@ -492,8 +492,8 @@ def main():
             'history': history,
             'test_acc': test_acc,
             'test_loss': test_loss
-        }, "models/cnn_v4.pt")
-        logging.info(f"Model saved to models/cnn_v4.pt")
+        }, "models/cnn_standard.pt")
+        logging.info(f"Model saved to models/cnn_standard.pt")
         
     except Exception as e:
         logging.error(f"Error during training: {str(e)}")

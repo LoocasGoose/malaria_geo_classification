@@ -51,49 +51,47 @@ def create_reverse_complement(x):
     # Reverse the sequence
     x_rev = torch.flip(x, dims=[2])
     
-    # Swap complementary bases: A↔T (0↔3) and C↔G (1↔2)
-    # N (4) stays the same
-    x_comp = torch.zeros_like(x_rev)
-    x_comp[:, 0] = x_rev[:, 3]  # A gets T
-    x_comp[:, 1] = x_rev[:, 2]  # C gets G
-    x_comp[:, 2] = x_rev[:, 1]  # G gets C
-    x_comp[:, 3] = x_rev[:, 0]  # T gets A
-    x_comp[:, 4] = x_rev[:, 4]  # N stays N
+    # Use tensor indexing for faster complementation
+    # A↔T (0↔3), C↔G (1↔2), N (4) stays the same
+    x_comp = x_rev[:, [3, 2, 1, 0, 4], :]
     
     return x_comp
 
 
 class StrandSymmetricConv(nn.Module):
-    """DNA strand-aware convolutional layer
+    """Convolutional layer that processes both forward and reverse strands.
     
-    Processes DNA sequences in both forward and reverse-complement 
-    directions simultaneously. This ensures the model detects patterns
-    regardless of which DNA strand they appear on.
+    This layer performs the same convolution on both the original sequence
+    and its reverse complement, then combines the results. This ensures
+    the model identifies patterns regardless of which DNA strand they appear on.
     
-    Args:
-        in_channels: Input channels (5 for DNA: A,C,G,T,N)
-        out_channels: Number of pattern detectors to create
-        kernel_size: Size of DNA patterns to detect (e.g., 9 = 9bp motifs)
-        padding: Maintains sequence length during convolution
-    
-    Input: [batch, channels, seq_len] DNA sequence tensor
-    Output: [batch, out_channels, seq_len] pattern activations
+    Attributes:
+        conv: Convolutional layer applied to both strands
+        strand_weights: Learnable weights for combining strand-specific features
     """
     
     def __init__(self, in_channels, out_channels, kernel_size, padding='same'):
         super().__init__()
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding)
-    
+        # Learnable weights for combining forward and reverse strands
+        # Initialize with equal weights (like averaging)
+        self.strand_weights = nn.Parameter(torch.ones(2) / 2.0)
+        
     def forward(self, x):
-        x_rc = create_reverse_complement(x)
-        # Process both strands in parallel using group convolution
-        combined = torch.cat([x, x_rc], dim=0)
-        conv_out = self.conv(combined)
-        # Split and align features
-        x_fwd, x_rev = torch.chunk(conv_out, 2, dim=0)
-        x_rev = torch.flip(x_rev, dims=[-1])  # Reverse back to original orientation
-        # Use mean instead of max for smoother equivariance
-        return (x_fwd + x_rev) / 2.0
+        # Process forward strand
+        x_fwd = self.conv(x)
+        
+        # Process reverse complement
+        x_rev = create_reverse_complement(x)
+        x_rev = self.conv(x_rev)
+        x_rev = torch.flip(x_rev, [2])  # Reverse back to match positions
+        
+        # Use learned weights to combine strands instead of simple averaging
+        # Normalize weights with softmax to ensure they sum to 1
+        norm_weights = F.softmax(self.strand_weights, dim=0)
+        x = norm_weights[0] * x_fwd + norm_weights[1] * x_rev
+        
+        return x
 
 class PositionalEncoding(nn.Module):
     """Adds genomic position context to DNA sequences
@@ -207,16 +205,21 @@ class DenseResidualBlock(nn.Module):
     """
     def __init__(self, in_channels, out_channels, kernel_size, cardinality=4):
         super().__init__()
+        # Ensure odd kernel sizes for better symmetric padding
+        kernel_size = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
+        
         # Split processing into multiple paths (cardinality)
         self.paths = nn.ModuleList()
         path_channels = out_channels // cardinality
         
         for i in range(cardinality):
+            # Ensure second kernel is also odd-sized
+            second_kernel = (kernel_size // 2) * 2 + 1  # Always odd
             path = nn.Sequential(
                 StrandSymmetricConv(in_channels, path_channels, kernel_size, padding='same'),
                 nn.BatchNorm1d(path_channels),
                 nn.ReLU(),
-                StrandSymmetricConv(path_channels, path_channels, kernel_size//2 + 1, padding='same'),
+                StrandSymmetricConv(path_channels, path_channels, second_kernel, padding='same'),
                 nn.BatchNorm1d(path_channels),
             )
             self.paths.append(path)
@@ -297,19 +300,24 @@ class HierarchicalAttention(nn.Module):
         return self.fusion(combined)
 
 class DNACNN(nn.Module):
-    """Malaria DNA Analysis CNN Architecture
+    """CNN model for DNA sequence classification.
     
-    Custom neural network designed specifically for analyzing 
-    Plasmodium falciparum DNA sequences to predict geographic origin.
+    Features:
+        - Hierarchical processing of DNA sequences
+        - Strand-symmetric convolutions (optional)
+        - Positional encoding for genomic context
+        - Attention mechanisms for interpretability
+        - Residual connections for gradient flow
     
     Args:
-        n_classes: Number of output countries/regions
+        n_classes: Number of output classes
         seq_length: Input DNA sequence length (default 1000bp)
         n_channels: Input channels (5 for A,C,G,T,N)
         conv_channels: Convolutional filter counts [64, 128, 256]
         kernel_sizes: DNA pattern sizes to detect [15,9,5] 
         fc_sizes: Hidden layer sizes [1024, 512]
         dropout: Dropout rate for regularization (default 0.4)
+        conv_type: Type of convolution to use ('symmetric' or 'standard')
     
     Input: [batch, seq_length, 5] DNA sequences
     Output: [batch, n_classes] Country probabilities
@@ -317,7 +325,7 @@ class DNACNN(nn.Module):
     
     def __init__(self, n_classes, seq_length=1000, n_channels=5, 
                  conv_channels=[64, 128, 256], kernel_sizes=[15, 9, 5], 
-                 fc_sizes=[1024, 512], dropout=0.4):
+                 fc_sizes=[1024, 512], dropout=0.4, conv_type='symmetric'):
         """
         Initialize CNN model.
         
@@ -329,8 +337,13 @@ class DNACNN(nn.Module):
             kernel_sizes: List of kernel sizes for each conv layer
             fc_sizes: List of hidden units for fully connected layers
             dropout: Dropout probability
+            conv_type: Type of convolution ('symmetric' or 'standard')
         """
         super(DNACNN, self).__init__()
+        
+        # Select convolution type
+        self.conv_type = conv_type
+        ConvLayer = StrandSymmetricConv if conv_type == 'symmetric' else StandardConv
         
         # Input shape: [batch_size, 1, seq_length, n_channels]
         
@@ -380,7 +393,7 @@ class DNACNN(nn.Module):
         self._initialize_weights()
         
         # Attention pooling
-        self.hierarchical_attn = HierarchicalAttention([32, 64, 128])
+        self.hierarchical_attn = HierarchicalAttention(conv_channels)
     
     def _initialize_weights(self):
         """Initialize network weights."""
@@ -666,15 +679,11 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
     # Move model to device
     model = model.to(device)
     
-    # Initialize early stopping
-    early_stopping = EarlyStopping(
-        patience=early_stopping_patience, 
-        verbose=True,
-        path=os.path.join(model_dir, 'best_model.pt')
-    )
+    # Early stopping
+    early_stopping = EarlyStopping(patience=early_stopping_patience, path=os.path.join(model_dir, 'best_model.pt'))
     
-    # Initialize gradient scaler for mixed precision
-    scaler = GradScaler('cuda') if mixed_precision and device == 'cuda' else None
+    # Initialize scaler for mixed precision training
+    scaler = GradScaler() if mixed_precision and device == 'cuda' else None
     
     # Get current timestamp for model naming
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -759,7 +768,6 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
                 labels = batch['label'].to(device)
                 
                 # Forward pass
-                sequences = augment_sequence(sequences)
                 outputs = model(sequences)
                 loss = criterion(outputs, labels)
                 
@@ -802,7 +810,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
                      f"Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}")
     
     # Load best model (saved during early stopping)
-    model.load_state_dict(torch.load(os.path.join(model_dir, 'best_model.pt')))
+    model.load_state_dict(torch.load(os.path.join(model_dir, 'cnn_advanced.pt')))
     
     # Also save final model (which may be different from best)
     torch.save(model.state_dict(), os.path.join(model_dir, f'final_model_{timestamp}.pt'))
@@ -974,7 +982,8 @@ def main():
         conv_channels=[64, 128, 256],
         kernel_sizes=[15, 9, 5],
         fc_sizes=[1024, 512],
-        dropout=0.4
+        dropout=0.4,
+        conv_type='symmetric'
     )
     
     # Add multi-GPU support
@@ -1023,7 +1032,8 @@ def main():
         conv_channels=[64, 128, 256],
         kernel_sizes=[15, 9, 5],
         fc_sizes=[1024, 512],
-        dropout=0.4
+        dropout=0.4,
+        conv_type='standard'
     )
     
     # Add multi-GPU support
