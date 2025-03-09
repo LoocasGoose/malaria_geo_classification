@@ -25,7 +25,7 @@ import numpy as np
 import math
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from data.GenomicSequence import GenomicSequenceDataset
+from data.genomic_sequences import GenomicSequenceDataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

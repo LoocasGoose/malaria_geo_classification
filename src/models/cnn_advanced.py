@@ -1,5 +1,5 @@
 """
-Malaria Geographic Origin Classifier CNN
+Malaria Geographic Origin Classifier CNN, Advanced. 
 
 This CNN model specializes in identifying the geographic origin of malaria 
 samples by analyzing patterns in their DNA sequences. Key features:
@@ -13,8 +13,8 @@ Example Usage:
     trainer = train(model, train_loader, val_loader, ...)
     evaluate(model, test_loader, ...)
 
-Please read the CNN_README.md file for more information on differences between
-this model and CNN_Classifier_v4.py. 
+Please read the cnn_README.md file for more information on differences between
+this model and cnn_standard.py. 
 """
 
 import os
@@ -30,15 +30,13 @@ import json
 import time
 from datetime import datetime
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, precision_score, recall_score
-from src.data.GenomicSequence import GenomicSequenceDataset
+from src.data.genomic_sequences import GenomicSequenceDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.amp import autocast, GradScaler
 import math
-from src.evaluation.model_evaluator import create_html_report, create_heatmaps
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 def create_reverse_complement(x):
     """Create reverse complement of DNA sequences in one-hot encoding.
@@ -710,7 +708,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
                 optimizer.zero_grad()
                 
                 # Apply data augmentation with variant simulation
-                if training_mode == 'train':
+                if model.training:  # Check if the model is in training mode
                     # Apply sequence augmentations
                     sequences = augment_sequence(sequences)
                     sequences = augment_sequence_with_rc(sequences)
@@ -817,24 +815,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
 
 
 def evaluate(model, test_loader, criterion, device):
-    """Evaluates model performance on test data
-    
-    Computes comprehensive metrics:
-    - Test loss
-    - Accuracy
-    - F1 score
-    - Precision
-    - Recall
-    
-    Args:
-        model: Trained DNACNN
-        test_loader: Test data loader
-        criterion: Loss function
-        device: cuda/cpu
-    
-    Returns:
-        Dictionary of test metrics
-    """
+    """Evaluate model performance on test data"""
     model.eval()
     test_loss = 0.0
     test_preds = []
@@ -877,175 +858,6 @@ def evaluate(model, test_loader, criterion, device):
     return metrics
 
 
-def visualize_genome_regions(model, test_loader, device, output_dir='metrics'):
-    """Generates comprehensive genomic region visualizations
-    
-    This visualization function helps identify which parts of the genome
-    are most important for classification decisions by:
-    
-    1. Tracking attention weights across the sequence
-    2. Generating saliency maps showing input importance
-    3. Highlighting potential binding motifs or functional regions
-    4. Comparing activations across different genomic contexts
-    5. Creating interactive visualizations for exploration
-    
-    Args:
-        model: Trained model with hierarchical attention
-        test_loader: DataLoader with test sequences
-        device: Computing device
-        output_dir: Directory to save visualizations
-        
-    Returns:
-        Path to HTML report with interactive visualizations
-    """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    model.eval()
-    model.to(device)
-    
-    # Get a small batch of data
-    for batch in test_loader:
-        sequences = batch['sequence'].to(device)
-        labels = batch['label'].to(device)
-        sample_ids = batch.get('sample_id', None)
-        positions = batch.get('position', None)
-        chromosomes = batch.get('chromosome', None)
-        break
-    
-    # Set up attention hooks to capture attention weights
-    attention_weights = []
-    
-    def get_attn_weights(name):
-        def hook(module, input, output):
-            # Reshape attention to [batch, seq_len]
-            if isinstance(output, tuple):
-                # Some layers return multiple outputs
-                attn = output[1]
-            else:
-                attn = output
-            attention_weights.append(attn.detach().cpu().numpy())
-        return hook
-    
-    # Register hook for attention layers if using hierarchical attention
-    if hasattr(model, 'hierarchical_attn'):
-        for i, attn in enumerate(model.hierarchical_attn.attention_layers):
-            attn.attention[0].register_forward_hook(get_attn_weights(f'attn_{i}'))
-    
-    # Calculate gradients for saliency maps
-    handles = []
-    
-    # Store activations at different layers
-    activations = []
-    
-    def get_activations(name):
-        def hook(module, input, output):
-            activations.append((name, output.detach().cpu()))
-        return hook
-    
-    # Register hooks for key layers
-    for i, layer in enumerate(model.conv_layers):
-        handles.append(layer[0].relu.register_forward_hook(
-            get_activations(f'conv_{i}')))
-    
-    # Advanced: Track feature maps from different layers
-    feature_maps = {}
-    
-    def get_feature_maps(name):
-        def hook(module, input, output):
-            # Keep only the first few channels to avoid memory issues
-            feature_maps[name] = output[:, :5, :].detach().cpu()
-        return hook
-    
-    # Register hooks for feature maps
-    for i, layer in enumerate(model.conv_layers):
-        layer[0].register_forward_hook(get_feature_maps(f'features_{i}'))
-    
-    # Forward pass
-    outputs = model(sequences, positions, chromosomes)
-    predictions = torch.argmax(outputs, dim=1)
-    
-    # Generate CAM (Class Activation Mapping) heatmaps
-    # This technique reveals the important regions in the input for classification
-    logits = outputs
-    
-    # Get weights from the last layer
-    last_conv_layer = model.conv_layers[-1][0]
-    weights = model.output_layer.weight.detach().cpu().numpy()
-    
-    # Generate saliency maps - which input positions are most important?
-    sequences.requires_grad_(True)
-    model.zero_grad()
-    
-    # One-hot for true class
-    outputs = model(sequences, positions, chromosomes)
-    true_class_outputs = outputs.gather(1, labels.view(-1, 1)).squeeze()
-    true_class_outputs.backward(torch.ones_like(true_class_outputs))
-    
-    # Get gradients
-    saliency = sequences.grad.abs().sum(dim=2)
-    saliency = saliency.detach().cpu().numpy()
-    
-    # Original sequence data
-    orig_sequences = batch['sequence'].cpu().numpy()
-    
-    # Create directory for the visualizations
-    vis_dir = os.path.join(output_dir, 'genome_vis')
-    os.makedirs(vis_dir, exist_ok=True)
-    
-    # Generate HTML report with multiple visualization types
-    html_path = os.path.join(vis_dir, 'genome_regions.html')
-    
-    # Enhanced feature: Extract motifs from high-attention regions
-    # This helps identify binding sites or functional elements
-    motifs = []
-    
-    # Find high-attention regions
-    if attention_weights:
-        attn = attention_weights[-1]  # Use the last attention layer
-        attn = attn.reshape(attn.shape[0], -1)
-        
-        for i in range(min(5, attn.shape[0])):  # For up to 5 sequences
-            # Find top attention positions
-            top_indices = np.argsort(attn[i])[-10:]
-            
-            # Extract 10bp around each position, if available
-            for idx in top_indices:
-                if idx * 4 < orig_sequences.shape[1] - 10:  # Adjust for pooling layers
-                    start = idx * 4
-                    end = start + 10
-                    # Convert one-hot back to sequence
-                    seq_region = orig_sequences[i, start:end]
-                    bases = ['A', 'C', 'G', 'T', 'N']
-                    motif = ''.join([bases[np.argmax(pos)] for pos in seq_region])
-                    motifs.append(motif)
-    
-    # Generate HTML report with multiple views
-    html_report = create_html_report(
-        sequences=orig_sequences[:5],  # First 5 sequences
-        attention_weights=attention_weights,
-        saliency_maps=saliency[:5],
-        feature_maps={k: v[:5] for k, v in feature_maps.items()},
-        predictions=predictions[:5].cpu().numpy(),
-        true_labels=labels[:5].cpu().numpy(),
-        sample_ids=sample_ids[:5] if sample_ids is not None else None,
-        motifs=motifs,
-        output_path=html_path
-    )
-    
-    # Create heatmaps showing neuron activations
-    heatmap_path = os.path.join(vis_dir, 'activation_heatmaps.png')
-    create_heatmaps(activations, heatmap_path)
-    
-    # Clean up hooks
-    for handle in handles:
-        handle.remove()
-    
-    logging.info(f"Generated genome region visualizations at {vis_dir}")
-    
-    return html_path
-
-
 def get_batch_size(device):
     """Determine appropriate batch size based on available memory"""
     if device.type == 'cuda':
@@ -1060,7 +872,16 @@ def get_batch_size(device):
 
 
 def main():
-    """Main function to run the CNN training and evaluation."""
+    """Run full model training and evaluation"""
+    # Import visualization function from evaluator module
+    from torch.utils.data import DataLoader
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
@@ -1185,15 +1006,12 @@ def main():
     
     # Evaluation
     logging.info("Evaluating model on test set...")
-    metrics = evaluate(
+    metrics_symmetric = evaluate(
         model=model_symmetric,
         test_loader=test_loader,
         criterion=criterion,
         device=device
     )
-    
-    # Visualize attention
-    visualize_genome_regions(model_symmetric, test_loader, device)
     
     logging.info("Training and evaluation complete!")
 
@@ -1243,9 +1061,6 @@ def main():
         criterion=criterion,
         device=device
     )
-    
-    # Visualize attention
-    visualize_genome_regions(model_standard, test_loader, device)
     
     logging.info("Training and evaluation complete!")
 
