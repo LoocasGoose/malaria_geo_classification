@@ -9,15 +9,14 @@
 
 ### Key Enhancements in Advanced Version (Standard ➞ Advanced)
 
-1. Basic skip connections (`ResidualStrandConv`) ➞ `DenseResidualBlock` (used concepts from **ResNet**, **DenseNet**, and **ResNeXt** with **cardinality** for better gradient flow and feature reuse) 
-2. Single layer `AttentionPooling` ➞ `HierarchicalAttention` (apply attention to multiple layers) 
-3. Simple positional encoding (max_len=2000) ➞ Added chromosome-awareness (`PositionalEncoding`, n_chromosomes=14) and larger context window (max_len=10000) 
-4. No variant simulation ➞ Added `simulate_variants` function to model SNPs, insertions, and deletions 
-5. Simple reverse complement ➞ Multiple augmentation strategies: 
-    - `augment_sequence` - general sequence mutation
-    - `augment_sequence_with_rc` - improved reverse complement handling
-    - `add_positional_noise` - simulates sequencing errors 
-6. Simple averaging weights `StrandSymmetricConv` ➞ Learnable weights to combine information from forward and reverse strands, better detect strand-biased patterns
+| Feature | Standard Version | Advanced Version | Benefits/Details |
+|---------|-----------------|------------------|------------------|
+| Skip Connections | `ResidualStrandConv` | `DenseResidualBlock` | Used concepts from **ResNet**, **DenseNet**, and **ResNeXt** with **cardinality** for better gradient flow and feature reuse |
+| Attention Mechanism | Single layer `AttentionPooling` | `HierarchicalAttention` | Apply attention to multiple layers |
+| Positional Encoding | Simple encoding (max_len=2000) | Chromosome-aware `PositionalEncoding` | Added n_chromosomes=14 and larger context window (max_len=10000) |
+| Variant Simulation | None | `simulate_variants` function | Models SNPs, insertions, and deletions |
+| Sequence Augmentation | Simple reverse complement | Multiple strategies | `augment_sequence` (general mutation), `augment_sequence_with_rc` (improved RC handling), `add_positional_noise` (simulates sequencing errors) |
+| Strand Information Fusion | Simple averaging weights `StrandSymmetricConv` | Learnable weights | Better detection of strand-biased patterns |
 
 ### Additional Improvements
 - Mixed precision training
