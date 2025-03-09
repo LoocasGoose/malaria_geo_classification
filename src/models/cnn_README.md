@@ -1,21 +1,36 @@
-cnn_standard.py vs. cnn_advanced.py
+# CNN Model Documentation
 
-"cnn_standard.py" was the first "final version" of the model. It works well, but I wanted to try out some new features (some are complicated (to me), some are just ideas I had, and I just want to play around with). So I made a copy, now "cnn_advanced.py", and experimented. Some key features I tried:
+--------------------------------
+## Overview
 
-1. Basic skip connections (ResidualStrandConv) ➞ DenseResidualBlock (used concepts from ResNet, DenseNet, and ResNeXt with cardinality (grouped convolutions) for better gradient flow and feature reuse)
-2. Single layer AttentionPooling ➞ HierarchicalAttention (apply attention to multiple layers)
-3. Simple positional encoding (max_len=2000) ➞ added chromosome-awareness (n_chromosomes=14) and larger context window (max_len=10000)
-4. No variant simulation ➞ added simulate_variants function to model SNPs, insertions, and deletions
-5. Simple reverse complement ➞ multiple augmentation strategies:
-    - augment_sequence - general sequence mutation
-    - augment_sequence_with_rc - improved reverse complement handling
-    - add_positional_noise - simulates sequencing errors
-Other features:
-- Added mixed precision training, checkpoint management, dynamic batch sizing based on available hardware, and customizable configurable channels, kernel sizes, and FC layers. 
+### Standard vs Advanced CNN Implementation
 
-As I was building the CNN model, I documented each major versions below. Feel free to check them out and compare the differences between models!
+**cnn_standard.py** was the *first final version* of the model. It works, but I wanted to try out new features. Some are complicated (to me), some are just ideas I had that I want to play around with. So I made a copy, now **cnn_advanced.py**, and experimented. 
 
-Version 1: Basic Functioning Model
+### Key Enhancements in Advanced Version
+
+Standard ➞ Advanced
+1. Basic skip connections (`ResidualStrandConv`) ➞ `DenseResidualBlock` (used concepts from ResNet, DenseNet, and ResNeXt with cardinality for better gradient flow and feature reuse) 
+2. Single layer `AttentionPooling` ➞ `HierarchicalAttention` (apply attention to multiple layers) 
+3. Simple positional encoding (max_len=2000) ➞ Added chromosome-awareness (`PositionalEncoding`, n_chromosomes=14) and larger context window (max_len=10000) 
+4. No variant simulation ➞ Added `simulate_variants` function to model SNPs, insertions, and deletions 
+5. Simple reverse complement ➞ Multiple augmentation strategies: 
+    - `augment_sequence` - general sequence mutation
+    - `augment_sequence_with_rc` - improved reverse complement handling
+    - `add_positional_noise` - simulates sequencing errors 
+
+### Additional Improvements
+- Mixed precision training
+- Checkpoint management 
+- Dynamic batch sizing based on available hardware
+- Customizable configurable channels, kernel sizes, and FC layers
+
+--------------------------------
+## Model Evolution
+
+As I was building the CNN model, I documented each major version below. Feel free to check them out, compare the differences between models, and explore my thought process!
+
+### Version 1: Basic Functioning Model
 - 32 filters detecting 5bp patterns, basic padding to maintain length
 - Basic SGD optimizer, CrossEntropy loss, fixed learning rate
 - Fixed sequence windows (no sliding)
@@ -23,6 +38,7 @@ Version 1: Basic Functioning Model
 - Simple argmax prediction
 - Single validation check per epoch
 
+```
 [Input: DNA Seq]
     ↓ (1000bp, 5 channels)
 [Conv1D: 32 filters, 5bp kernel] → ReLU
@@ -36,8 +52,9 @@ Version 1: Basic Functioning Model
 [Dense: n_countries]
     ↓
 [Softmax]
+```
 
-Version 2: Depth & Basic Training, BIOS Optimization
+### Version 2: Depth & Basic Training, BIOS Optimization
 - Add 2 more conv layers (64, 128 filters)
 - Implement max pooling
 - Add validation split
@@ -45,6 +62,7 @@ Version 2: Depth & Basic Training, BIOS Optimization
 - Sequence length standardization
 - Basic data loader
 
+```
 [Input: DNA Seq]
     ↓ (1000bp, 5 channels)
 [Conv1D: 32 filters, 5bp kernel] → ReLU
@@ -66,8 +84,9 @@ Version 2: Depth & Basic Training, BIOS Optimization
 [Dense: n_countries]
     ↓
 [Softmax]
+```
 
-Version 3: Biological Awareness, Training Improvements
+### Version 3: Biological Awareness, Training Improvements
 - Reverse complement augmentation
 - Strand-symmetric conv base
 - Simple attention mechanism
@@ -75,6 +94,7 @@ Version 3: Biological Awareness, Training Improvements
 - Learning rate scheduling
 - Early stopping
 
+```
 [Input: DNA Seq]
     ↓ (1000bp, 5 channels)
            ↓                     ↓
@@ -105,8 +125,9 @@ Version 3: Biological Awareness, Training Improvements
                    [Dense: n_countries]
                            ↓
                        [Softmax]
+```
 
-Version 4 (cnn_standard.py): Advanced Architecture and Regularization
+### Version 4 (this version is cnn_standard.py): Advanced Architecture and Regularization
 - Residual connections 
 - Batch normalization
 - Positional encoding
@@ -114,6 +135,7 @@ Version 4 (cnn_standard.py): Advanced Architecture and Regularization
 - Label smoothing
 - Gradient clipping
 
+```
 [Input: DNA Seq (1000bp, 5 channels)]
            ↓
 [Positional Encoding] (64 positional channels)
@@ -160,9 +182,10 @@ Version 4 (cnn_standard.py): Advanced Architecture and Regularization
 [Dense: n_countries + Label Smoothing]
            ↓
        [Softmax]
+```
 
-
-Version 5 (cnn_advanced.py): Further Performance Tuning, Accuracy Improvements, Advanced Biological Features, Readability & Documentations
+### Version 5 (this version is cnn_advanced.py): Further Performance Tuning
+Key improvements:
 - Model checkpointing
 - Metric tracking
 - Interpretability
@@ -175,7 +198,7 @@ Version 5 (cnn_advanced.py): Further Performance Tuning, Accuracy Improvements, 
 - Advanced region visualization
 - Complex skip connections
 
-
+```
                       [Input: DNA Seq]
                               ↓
     ┌────────────────────────┼────────────────────────┐
@@ -209,21 +232,21 @@ Version 5 (cnn_advanced.py): Further Performance Tuning, Accuracy Improvements, 
                     [Output Interpretation]
                               ↓
                        [Multi-class Pred]
+```
 
-Core Functionality
+--------------------------------
+## Core Functionality
 
-This custom CNN is specifically designed to analyze Plasmodium falciparum DNA sequences and predict their geographic origins. Unlike generic models, it processes DNA's double-stranded nature simultaneously using strand-symmetric convolutions, ensuring it detects patterns regardless of which DNA strand they appear on. 
+This custom CNN is specifically designed to analyze **Plasmodium falciparum** DNA sequences and predict their geographic origins. Unlike generic models, it processes DNA's double-stranded nature simultaneously using **strand-symmetric convolutions**, ensuring it detects patterns regardless of which DNA strand they appear on.
 
-Unique Features
-The model incorporates positional encoding to understand genomic context and attention mechanisms to focus on biologically significant regions. Specialized 15bp, 9bp, and 5bp convolutional filters detect malaria-specific motifs like drug resistance markers and surface proteins, while residual connections enable stable training on deep networks. Built-in data augmentation simulates real-world sequencing errors and genetic variations, making it robust for field use.
+### Unique Features
+The model incorporates **positional encoding** to understand genomic context and **attention mechanisms** to focus on biologically significant regions. Specialized 15bp, 9bp, and 5bp convolutional filters detect malaria-specific motifs like drug resistance markers and surface proteins, while **residual connections** enable stable training on deep networks. Built-in **data augmentation** simulates real-world sequencing errors and genetic variations, making it robust for field use.
 
-Technical Advantages
-Key innovations include: 
-    1) Reverse-complement invariance eliminating strand bias
-    2) Chromosomal position tracking for context-aware analysis 
-    3) Memory-efficient sequence windowing (1kb segments) enabling whole-genome analysis on consumer GPUs
+### Technical Advantages
+Key innovations include:
+1. **Reverse-complement invariance** eliminating strand bias
+2. **Chromosomal position tracking** for context-aware analysis 
+3. **Memory-efficient sequence windowing** (1kb segments) enabling whole-genome analysis on consumer GPUs
 
-Practical Applications
-The model outputs interpretable attention maps showing which genetic regions influenced predictions, crucial for tracking drug-resistant strain evolution. 
-
-Unlike transformer-based models requiring >16GB VRAM, it runs efficiently on portable devices (<4GB VRAM) while maintaining hospital-grade accuracy, making it ideal for real-time malaria surveillance in resource-limited settings.
+### Practical Applications
+The model outputs **interpretable attention maps** showing which genetic regions influenced predictions, crucial for tracking drug-resistant strain evolution.
