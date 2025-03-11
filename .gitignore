@@ -26,7 +26,8 @@ data/processed/
 logs/
 src/data/fix_paths.py
 src/data/testing.py
-src/notebooks/Data_access.ipynb
+notebooks/Data_access.ipynb
+create_requirements.py
 
 # Local Settings
 .env
