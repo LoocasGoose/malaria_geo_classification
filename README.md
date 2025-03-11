@@ -22,6 +22,16 @@ The approach combines traditional machine learning (Multinomial Naive Bayes) wit
 4. **Data splitting**: Partition data into training, validation, and test sets with stratification
 5. **Sequence windowing**: Generate fixed-length windows (1kb) from reference genomes with variants applied
 
+## Configuration
+
+The project uses a centralized configuration system for easy parameter management:
+
+- **config.yml**: Central configuration file containing all parameters for data processing, model training, and evaluation. This allows quick experimentation without modifying code.
+- **environment.yml**: Conda environment specification for reproducible environment setup.
+- **utils.py**: Common utility functions including configuration loading, logging setup, and performance measurement.
+
+To customize the project for your needs, simply modify the parameters in `config.yml` rather than changing code directly.
+
 ## Models
 
 ### Multinomial Naive Bayes
@@ -145,8 +155,12 @@ malaria-classification/
 ├── README.md                  # Project overview
 ├── TECHNICAL_DETAILS.md       # Detailed technical documentation
 ├── QUICKSTART.md              # Getting started guide
+├── config.yml                 # Centralized configuration
+├── environment.yml            # Conda environment specification
 └── requirements.txt           # Project dependencies
 ```
+
+## Getting Started
 
 See [QUICKSTART.md](QUICKSTART.md) for detailed instructions on:
 - Setting up the environment
