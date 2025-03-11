@@ -188,19 +188,20 @@ As I was building the CNN model, I documented each major version below. Feel fre
 
 ### Version 5 (this version is cnn_advanced.py): Further Performance Tuning
 Key improvements:
-- Model and training checkpointing
-- Metric tracking
-- Interpretability
-- Mixed precision training
-- Memory optimizations
-- Multi-GPU support
 - Chromosome position handling
 - Density Residual Block
 - Variant simulations (SNPs, insertions, deletions)
 - Hierarchical attention mechanism
 - Advanced region visualization
 - Complex skip connections
-- Learnable weights
+- Learnable weights for combining strand-specific features
+- Model and training checkpointing
+- Metric tracking
+- Interpretability
+- Mixed precision training
+- Memory optimizations
+- Multi-GPU support
+
 
 ```
                       [Input: DNA Seq]
