@@ -31,9 +31,14 @@ import time
 from datetime import datetime
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, precision_score, recall_score
 from src.data.genomic_sequences import GenomicSequenceDataset
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from torch.amp import autocast, GradScaler
 import math
+import optuna
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+import os.path as osp
+import yaml
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -342,9 +347,7 @@ class DNACNN(nn.Module):
         super(DNACNN, self).__init__()
         
         # Select convolution type
-        self.conv_type = conv_type
-        ConvLayer = StrandSymmetricConv if conv_type == 'symmetric' else StandardConv
-        
+        self.conv_type = conv_type        
         # Input shape: [batch_size, 1, seq_length, n_channels]
         
         # Add positional encoding
@@ -810,7 +813,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, scheduler=None,
                      f"Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}")
     
     # Load best model (saved during early stopping)
-    model.load_state_dict(torch.load(os.path.join(model_dir, 'cnn_advanced.pt')))
+    model.load_state_dict(torch.load(os.path.join(model_dir, 'best_model.pt')))
     
     # Also save final model (which may be different from best)
     torch.save(model.state_dict(), os.path.join(model_dir, f'final_model_{timestamp}.pt'))
@@ -880,7 +883,7 @@ def get_batch_size(device):
 
 
 def main():
-    """Run full model training and evaluation"""
+    """Run full model training, evaluation, and hyperparameter tuning"""
     # Import visualization function from evaluator module
     from torch.utils.data import DataLoader
     
@@ -957,7 +960,7 @@ def main():
     else:
         class_weights = None
 
-    # Label smoothing
+    # Label smoothing cross entropy
     class LabelSmoothingCrossEntropy(nn.Module):
         def __init__(self, smoothing=0.1):
             super().__init__()
@@ -970,20 +973,244 @@ def main():
             smooth_loss = -log_probs.mean(dim=-1)
             loss = (1.0 - self.smoothing) * nll_loss + self.smoothing * smooth_loss
             return loss.mean()
-
-    # Use in training:
-    criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
     
-    # Create model
+    # Define objective function for Optuna hyperparameter tuning
+    def objective(trial):
+        # Hyperparameters to tune
+        conv_channels = [
+            trial.suggest_int("conv_channel_1", 32, 128, step=16),
+            trial.suggest_int("conv_channel_2", 64, 256, step=32),
+            trial.suggest_int("conv_channel_3", 128, 512, step=64)
+        ]
+        
+        kernel_sizes = [
+            trial.suggest_int("kernel_size_1", 5, 25, step=2),
+            trial.suggest_int("kernel_size_2", 3, 15, step=2),
+            trial.suggest_int("kernel_size_3", 3, 9, step=2)
+        ]
+        
+        fc_sizes = [
+            trial.suggest_int("fc_size_1", 512, 2048, step=256),
+            trial.suggest_int("fc_size_2", 256, 1024, step=128)
+        ]
+        
+        dropout = trial.suggest_float("dropout", 0.2, 0.6, step=0.1)
+        learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-3, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+        smoothing = trial.suggest_float("label_smoothing", 0.0, 0.2, step=0.05)
+        
+        # Select the convolution type
+        conv_type = trial.suggest_categorical("conv_type", ["symmetric", "standard"])
+        
+        # Create model with trial hyperparameters
+        model = DNACNN(
+            n_classes=n_classes,
+            seq_length=window_size,
+            n_channels=5,  # A, C, G, T, N
+            conv_channels=conv_channels,
+            kernel_sizes=kernel_sizes,
+            fc_sizes=fc_sizes,
+            dropout=dropout,
+            conv_type=conv_type
+        )
+        
+        # Add multi-GPU support
+        if torch.cuda.device_count() > 1:
+            logging.info(f"Using {torch.cuda.device_count()} GPUs!")
+            model = nn.DataParallel(model)
+        
+        model.to(device)
+        
+        # Define loss function
+        criterion = LabelSmoothingCrossEntropy(smoothing=smoothing)
+        
+        # Define optimizer
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        
+        # Learning rate scheduler
+        scheduler = CosineAnnealingLR(optimizer, T_max=10)
+        
+        # Training
+        n_epochs = 15  # Reduce epochs for hyperparameter tuning
+        best_val_loss = float('inf')
+        patience_counter = 0
+        
+        for epoch in range(n_epochs):
+            # Training phase
+            model.train()
+            train_loss = 0.0
+            
+            for batch_idx, (sequences, labels, positions, chromosomes) in enumerate(train_loader):
+                sequences, labels = sequences.to(device), labels.to(device)
+                
+                if positions is not None:
+                    positions = positions.to(device)
+                if chromosomes is not None:
+                    chromosomes = chromosomes.to(device)
+                
+                optimizer.zero_grad()
+                
+                # Apply data augmentation
+                if trial.suggest_categorical("use_augmentation", [True, False]):
+                    sequences = augment_sequence(sequences)
+                
+                # Forward pass
+                outputs = model(sequences, positions, chromosomes)
+                loss = criterion(outputs, labels)
+                
+                # Backward pass and optimization
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+                
+                # Report intermediate objective values for pruning
+                if batch_idx % 10 == 0:
+                    trial.report(loss.item(), epoch * len(train_loader) + batch_idx)
+                    
+                    # Check if trial should be pruned
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+            
+            # Validation phase
+            model.eval()
+            val_loss = 0.0
+            correct = 0
+            total = 0
+            
+            with torch.no_grad():
+                for sequences, labels, positions, chromosomes in val_loader:
+                    sequences, labels = sequences.to(device), labels.to(device)
+                    
+                    if positions is not None:
+                        positions = positions.to(device)
+                    if chromosomes is not None:
+                        chromosomes = chromosomes.to(device)
+                    
+                    outputs = model(sequences, positions, chromosomes)
+                    loss = criterion(outputs, labels)
+                    
+                    val_loss += loss.item()
+                    
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+            
+            val_loss = val_loss / len(val_loader)
+            val_accuracy = correct / total
+            
+            # Update scheduler
+            scheduler.step()
+            
+            # Early stopping check
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= 3:  # Early stopping for hyperparameter tuning
+                break
+            
+        return best_val_loss
+    
+    # Run hyperparameter optimization?
+    run_hyperparameter_tuning = True
+    
+    if run_hyperparameter_tuning:
+        logging.info("Starting hyperparameter optimization...")
+        
+        # Create a study object and optimize the objective function
+        study_name = "malaria_cnn_optimization"
+        storage_name = "sqlite:///models/optuna_studies.db"
+        
+        # Create the directory for the database if it doesn't exist
+        os.makedirs("models", exist_ok=True)
+        
+        study = optuna.create_study(
+            study_name=study_name,
+            storage=storage_name,
+            direction="minimize",
+            sampler=TPESampler(seed=42),
+            pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=5),
+            load_if_exists=True
+        )
+        
+        study.optimize(objective, n_trials=20, timeout=36000)  # 10 hours timeout
+        
+        # Get best parameters
+        best_params = study.best_params
+        best_value = study.best_value
+        logging.info(f"Best trial value: {best_value}")
+        logging.info(f"Best parameters: {best_params}")
+        
+        # Save best parameters to a file
+        with open("models/best_hyperparameters.yaml", "w") as f:
+            yaml.dump(best_params, f)
+        
+        # Visualization
+        try:
+            from optuna.visualization import plot_optimization_history, plot_param_importances
+            
+            # Plot optimization history
+            history_fig = plot_optimization_history(study)
+            history_fig.write_image("figures/optuna_history.png")
+            
+            # Plot parameter importances
+            param_fig = plot_param_importances(study)
+            param_fig.write_image("figures/optuna_param_importances.png")
+        except:
+            logging.warning("Optuna visualization failed. Continuing without plots.")
+        
+        # Use best parameters for final model
+        conv_channels = [
+            best_params["conv_channel_1"],
+            best_params["conv_channel_2"],
+            best_params["conv_channel_3"]
+        ]
+        
+        kernel_sizes = [
+            best_params["kernel_size_1"],
+            best_params["kernel_size_2"],
+            best_params["kernel_size_3"]
+        ]
+        
+        fc_sizes = [
+            best_params["fc_size_1"],
+            best_params["fc_size_2"]
+        ]
+        
+        dropout = best_params["dropout"]
+        learning_rate = best_params["learning_rate"]
+        weight_decay = best_params["weight_decay"]
+        smoothing = best_params["label_smoothing"]
+        conv_type = best_params["conv_type"]
+    else:
+        # Default parameters if not running hyperparameter tuning
+        conv_channels = [64, 128, 256]
+        kernel_sizes = [15, 9, 5]
+        fc_sizes = [1024, 512]
+        dropout = 0.4
+        learning_rate = 0.001
+        weight_decay = 1e-4
+        smoothing = 0.1
+        conv_type = 'symmetric'
+    
+    # Train final model with best/default parameters
+    
+    # Use label smoothing
+    criterion = LabelSmoothingCrossEntropy(smoothing=smoothing)
+    
+    # Create model with symmetric convolutions
     model_symmetric = DNACNN(
         n_classes=n_classes,
         seq_length=window_size,
         n_channels=5,  # A, C, G, T, N
-        conv_channels=[64, 128, 256],
-        kernel_sizes=[15, 9, 5],
-        fc_sizes=[1024, 512],
-        dropout=0.4,
-        conv_type='symmetric'
+        conv_channels=conv_channels,
+        kernel_sizes=kernel_sizes,
+        fc_sizes=fc_sizes,
+        dropout=dropout,
+        conv_type=conv_type
     )
     
     # Add multi-GPU support
@@ -991,14 +1218,16 @@ def main():
         logging.info(f"Using {torch.cuda.device_count()} GPUs!")
         model_symmetric = nn.DataParallel(model_symmetric)
     
+    model_symmetric.to(device)
+    
     # Define optimizer
-    optimizer = optim.AdamW(model_symmetric.parameters(), lr=0.001, weight_decay=1e-4)  # Increased weight decay
+    optimizer = optim.AdamW(model_symmetric.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Learning rate scheduler
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
     
     # Training
-    logging.info("Starting training...")
+    logging.info("Starting training with best parameters...")
     model_symmetric, history = train(
         model=model_symmetric,
         train_loader=train_loader,
@@ -1023,56 +1252,66 @@ def main():
     )
     
     logging.info("Training and evaluation complete!")
-
-    # Without equivariance
-    model_standard = DNACNN(
-        n_classes=n_classes,
-        seq_length=window_size,
-        n_channels=5,  # A, C, G, T, N
-        conv_channels=[64, 128, 256],
-        kernel_sizes=[15, 9, 5],
-        fc_sizes=[1024, 512],
-        dropout=0.4,
-        conv_type='standard'
-    )
     
-    # Add multi-GPU support
-    if torch.cuda.device_count() > 1:
-        logging.info(f"Using {torch.cuda.device_count()} GPUs!")
-        model_standard = nn.DataParallel(model_standard)
+    # Optionally train a standard model for comparison
+    train_standard_model = False
     
-    # Define optimizer
-    optimizer = optim.AdamW(model_standard.parameters(), lr=0.001, weight_decay=1e-4)  # Increased weight decay
-    
-    # Learning rate scheduler
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
-    
-    # Training
-    logging.info("Starting training without equivariance...")
-    model_standard, history = train(
-        model=model_standard,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        n_epochs=30,
-        device=device,
-        model_dir='models',
-        early_stopping_patience=5,
-        mixed_precision=True
-    )
-    
-    # Evaluation
-    logging.info("Evaluating model on test set without equivariance...")
-    metrics = evaluate(
-        model=model_standard,
-        test_loader=test_loader,
-        criterion=criterion,
-        device=device
-    )
-    
-    logging.info("Training and evaluation complete!")
+    if train_standard_model:
+        # Without equivariance
+        model_standard = DNACNN(
+            n_classes=n_classes,
+            seq_length=window_size,
+            n_channels=5,  # A, C, G, T, N
+            conv_channels=conv_channels,
+            kernel_sizes=kernel_sizes,
+            fc_sizes=fc_sizes,
+            dropout=dropout,
+            conv_type='standard'
+        )
+        
+        # Add multi-GPU support
+        if torch.cuda.device_count() > 1:
+            logging.info(f"Using {torch.cuda.device_count()} GPUs!")
+            model_standard = nn.DataParallel(model_standard)
+        
+        model_standard.to(device)
+        
+        # Define optimizer
+        optimizer = optim.AdamW(model_standard.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        
+        # Learning rate scheduler
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+        
+        # Training
+        logging.info("Starting training without equivariance...")
+        model_standard, history = train(
+            model=model_standard,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            n_epochs=30,
+            device=device,
+            model_dir='models',
+            early_stopping_patience=5,
+            mixed_precision=True
+        )
+        
+        # Evaluation
+        logging.info("Evaluating model on test set without equivariance...")
+        metrics = evaluate(
+            model=model_standard,
+            test_loader=test_loader,
+            criterion=criterion,
+            device=device
+        )
+        
+        logging.info("Standard model training and evaluation complete!")
+        
+        # Compare models
+        logging.info(f"Symmetric model metrics: {metrics_symmetric}")
+        logging.info(f"Standard model metrics: {metrics}")
 
 
 if __name__ == "__main__":
