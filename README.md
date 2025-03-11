@@ -16,7 +16,7 @@ The approach combines traditional machine learning (Multinomial Naive Bayes) wit
 
 ## Data Processing Pipeline
 
-1. **Data acquisition**: Access the MalariaGEN Pf7 dataset via the `malariagen_data` API
+1. **Data acquisition**: Access the MalariaGEN Pf7 dataset via the `malariagen_data` API. Need to request data access to their Google Cloud access. 
 2. **Quality filtering**: Select high-quality samples based on metadata thresholds
 3. **Feature extraction**: Process genetic variants into TF-IDF weighted feature vectors
 4. **Data splitting**: Partition data into training, validation, and test sets with stratification
@@ -59,9 +59,101 @@ An enhanced version that builds upon the standard CNN with sophisticated archite
 
 Additional improvements include Optuna hyperparameter tuning, mixed precision training, checkpoint management, dynamic batch sizing, and advanced visualization capabilities.
 
-## Getting Started
+## Model Evaluation and Comparison
 
-[Installation and usage instructions will be added here]
+The project includes a comprehensive evaluation framework to compare model performance across multiple dimensions:
+
+### Performance Metrics
+
+Models are evaluated using a range of metrics:
+- **Accuracy**: Overall classification correctness
+- **Precision/Recall/F1**: Class-weighted metrics to handle potential geographic imbalance
+- **Inference Time**: Computational efficiency for practical deployment
+- **ROC and Precision-Recall Curves**: For multi-class evaluation
+
+### Strand Symmetry Analysis
+
+A dedicated module (`compare_strand_symmetry.py`) analyzes the impact of reverse complement equivariance:
+- Compares advanced CNN variants with and without strand symmetry
+- Quantifies performance differences across metrics
+- Identifies geographic regions most affected by strand-specific processing
+- Provides visualizations of relative improvements
+
+### Complexity-Performance Tradeoff
+
+The evaluation framework includes tools to analyze the relationship between model complexity and performance:
+- Model size and parameter count comparisons
+- Inference speed vs. accuracy tradeoffs
+- Efficiency scores (accuracy per ms of inference time)
+- Per-class performance analysis to identify where complexity helps most
+
+## Visualization Tools
+
+### Genomic Region Visualization
+
+Interactive HTML visualizations show which genomic regions influence classification decisions:
+- **Attention Heatmaps**: Highlighting important sequence positions
+- **Saliency Maps**: Gradient-based visualization of input importance
+- **Feature Maps**: Activation patterns across convolutional layers
+- **Motif Discovery**: Potential binding sites or functional elements derived from high-attention regions
+
+### Performance Visualization
+
+Comprehensive visualization tools include:
+- **Confusion Matrices**: Both count and percentage based
+- **ROC Curves**: For all models with AUC comparison
+- **Per-Class Performance**: Barplots of metrics by geographic region
+- **Training History**: Loss and accuracy curves over epochs
+- **Model Architecture Comparison**: Size and parameter visualizations
+
+## Performance Analysis
+
+(THE PF7 DATASET ACCESS HAS NOT GET BEEN GRANTED TO ME BY MALARIAGEN AND THUS I CANNOT RUN THE MODELS)
+
+### Geographic Classification Patterns
+
+### Model-Specific Strengths
+
+### Deployment Recommendations
+
+## Project Structure
+
+```
+malaria-classification/
+├── data/                      # Data storage
+│   ├── processed/             # Preprocessed data
+│   ├── reference/             # Reference genomic sequences
+│   └── split/                 # Train/val/test splits
+├── models/                    # Saved model weights
+├── src/
+│   ├── data/                  # Data processing modules
+│   │   ├── preprocess.py      # Data acquisition and preprocessing
+│   │   ├── data_splitter.py   # Train/val/test splitting
+│   │   └── genomic_sequences.py # PyTorch dataset for sequences
+│   ├── models/                # Model definitions
+│   │   ├── naive_bayes.py     # Multinomial Naive Bayes
+│   │   ├── cnn_standard.py    # Standard CNN architecture
+│   │   ├── cnn_advanced.py    # Advanced CNN architecture
+│   │   └── train.py           # Training pipeline
+│   ├── evaluation/            # Evaluation tools
+│   │   ├── model_evaluator.py # Model evaluation and visualization
+│   │   ├── model_comparison.py # Cross-model comparison
+│   │   └── compare_strand_symmetry.py # Strand symmetry analysis
+│   └── visualization/         # Visualization utilities
+│       └── performance_visualizer.py # Performance visualization tools
+├── reports/                   # Analysis reports and figures
+├── README.md                  # Project overview
+├── TECHNICAL_DETAILS.md       # Detailed technical documentation
+├── QUICKSTART.md              # Getting started guide
+└── requirements.txt           # Project dependencies
+```
+
+See [QUICKSTART.md](QUICKSTART.md) for detailed instructions on:
+- Setting up the environment
+- Downloading and preprocessing data
+- Training models
+- Evaluating performance
+- Generating visualizations
 
 ## Citation and References
 
