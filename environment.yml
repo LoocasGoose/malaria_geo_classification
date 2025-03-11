@@ -1,0 +1,32 @@
+name: malaria
+channels:
+  - pytorch
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - pip>=22.0.4
+  - numpy>=1.22.0
+  - pandas>=1.4.0
+  - scipy>=1.8.0
+  - scikit-learn>=1.0.2
+  - matplotlib>=3.5.1
+  - seaborn>=0.11.2
+  - biopython>=1.79
+  - pytorch>=1.12.0
+  - cudatoolkit>=11.3  # Adjust based on your CUDA version
+  - tqdm>=4.64.0
+  - dask>=2022.3.0
+  - xarray>=2022.3.0
+  - zarr>=2.11.0
+  - fsspec>=2022.3.0
+  - joblib>=1.1.0
+  - pip:
+    - gcsfs>=2022.3.0
+    - malariagen_data>=0.1.0
+    - plotly>=5.6.0
+    - optuna>=2.10.0
+    - optuna-dashboard>=0.7.0
+    - tensorboard>=2.8.0
+    - torch-optimizer>=0.3.0
