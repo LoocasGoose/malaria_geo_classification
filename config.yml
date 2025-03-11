@@ -1,0 +1,107 @@
+# Malaria Geographic Classification - Configuration File
+
+# Data Processing Settings
+data:
+  # MalariaGEN Pf7 Settings
+  use_gcs: true  # Use Google Cloud Storage for dataset access
+  cache_dir: "data/reference"
+  output_dir: "data/processed"
+  
+  # Quality Thresholds
+  metadata_quality_threshold: 0.5  # Minimum % callable for quality filter
+  min_samples_per_class: 50  # Minimum samples needed per country
+  
+  # Chromosome Selection
+  selected_chroms: 
+    - "Pf3D7_01_v3"  # Chromosome 1
+    - "Pf3D7_04_v3"  # Chromosome 4
+    - "Pf3D7_07_v3"  # Chromosome 7
+    - "Pf3D7_13_v3"  # Chromosome 13
+  
+  # Data Splitting
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 42
+  stratify: true
+
+# Sequence Dataset Settings
+sequences:
+  window_size: 1000
+  stride: 500
+  cache_size: 128
+  sample_limit: null  # Set to an integer to limit samples (for testing)
+
+# Model Settings
+models:
+  # Naive Bayes
+  naive_bayes:
+    hpo_trials: 20
+    cv_folds: 3
+    param_grid:
+      feature_selector__k: [2000, 5000, 10000, 20000, "all"]
+      classifier__alpha: [0.001, 0.01, 0.1, 0.5, 1.0, 5.0, 10.0]
+      classifier__fit_prior: [true, false]
+  
+  # CNN Standard
+  cnn_standard:
+    n_channels: 5  # A, C, G, T, N
+    dropout: 0.3
+    learning_rate: 0.001
+    weight_decay: 1e-5
+    label_smoothing: 0.1
+    grad_clip_val: 1.0
+    early_stopping_patience: 5
+    n_epochs: 30
+  
+  # CNN Advanced
+  cnn_advanced:
+    n_channels: 5  # A, C, G, T, N
+    conv_channels: [64, 128, 256]
+    kernel_sizes: [15, 9, 5]
+    fc_sizes: [1024, 512]
+    dropout: 0.4
+    learning_rate: 0.0005
+    weight_decay: 1e-6
+    label_smoothing: 0.1
+    early_stopping_patience: 10
+    n_epochs: 50
+    mixed_precision: true
+    cardinality: 4  # For DenseResidualBlock
+    positional_encoding:
+      max_len: 10000
+      n_chromosomes: 14
+    data_augmentation:
+      p_snp: 0.01
+      p_ins: 0.005
+      p_del: 0.005
+      p_noise: 0.02
+      p_rc: 0.5  # Reverse complement probability
+    
+# Training Settings
+training:
+  batch_sizes:
+    gpu: 128  # Batch size when using GPU
+    cpu: 32   # Batch size when using CPU
+  num_workers: 4
+  gradient_accumulation_steps: 1
+  hpo:
+    n_trials: 20
+    timeout: 43200  # 12 hours
+    study_name: "malaria_hpo"
+    
+# Evaluation Settings
+evaluation:
+  model_dir: "models"
+  metrics_dir: "metrics"
+  save_visualizations: true
+  generate_reports: true
+  
+# Visualization Settings
+visualization:
+  figure_dpi: 300
+  output_dir: "reports/figures"
+  plot_colors:
+    - "#3498db"  # Blue
+    - "#e74c3c"  # Red
+    - "#2ecc71"  # Green
+    - "#f39c12"  # Orange 
