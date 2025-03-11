@@ -19,6 +19,7 @@
 | Strand Information Fusion | Simple averaging weights `StrandSymmetricConv` | Learnable weights | Better detection of strand-biased patterns |
 
 ### Additional Improvements
+- Optuna hyperparameter tuning
 - Mixed precision training
 - Checkpoint management 
 - Dynamic batch sizing based on available hardware
