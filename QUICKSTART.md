@@ -11,18 +11,54 @@ This guide will help you get started with the Malaria Geographic Classification 
 
 ### Setup Environment
 
+You can set up the environment using either Conda (recommended) or pip:
+
+#### Using Conda (Recommended)
+
 ```bash
 # Clone the repository
 git clone https://github.com/LoocasGoose/malaria-classification.git
 cd malaria-classification
 
-# Create a conda environment
-conda create -n malaria python=3.10
+# Create and activate conda environment from environment.yml
+conda env create -f environment.yml
 conda activate malaria
+```
+
+#### Using pip
+
+```bash
+# Clone the repository
+git clone https://github.com/LoocasGoose/malaria-classification.git
+cd malaria-classification
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
+
+## Configuration
+
+The project uses a centralized configuration system with `config.yml`. You can adjust parameters without modifying code:
+
+```bash
+# View the default configuration
+cat config.yml
+
+# Edit configuration before running preprocessing/training
+# Example: Adjust quality threshold and selected chromosomes
+nano config.yml  # Or use any text editor
+```
+
+Key configuration sections:
+- `data`: Controls data acquisition and preprocessing
+- `sequences`: Controls sequence window generation
+- `models`: Contains parameters for each model type
+- `training`: Specifies batch sizes, workers, etc.
+- `evaluation`: Controls model evaluation and reporting
 
 ## Data Preparation
 
@@ -75,6 +111,16 @@ python src/models/train.py --model cnn_standard --epochs 30 --batch_size 128 --l
 python src/models/train.py --model cnn_advanced --epochs 50 --batch_size 64 --learning_rate 0.0005 --mixed_precision
 ```
 
+You can also use the configuration file instead of command-line arguments:
+
+```bash
+# Edit the configuration first
+nano config.yml
+
+# Then train with config file parameters
+python src/models/train.py --model cnn_advanced --use_config
+```
+
 ## Evaluation
 
 Evaluate a trained model on the test set:
@@ -118,6 +164,29 @@ python src/models/train.py --model cnn_advanced \
     --fc_sizes 1024 512 \
     --dropout 0.4 \
     --early_stopping 10
+```
+
+### Using Utilities
+
+The project provides utility functions in `src/utils.py`:
+
+```python
+from src.utils import load_config, setup_logging, get_device, timer
+
+# Load configuration
+config = load_config("config.yml")
+
+# Set up logging
+setup_logging(log_dir="logs")
+
+# Get appropriate device
+device = get_device()
+
+# Use timer decorator for performance monitoring
+@timer
+def my_function():
+    # Your code here
+    pass
 ```
 
 ## Troubleshooting
