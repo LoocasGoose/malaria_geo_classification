@@ -1,7 +1,26 @@
-'''
-preprocess.py
-~~~~~~~~~~
-'''
+"""
+Genomic Data Preprocessing Module for Malaria Geographic Origin Classification.
+
+This module handles the preprocessing of genomic data from the MalariaGEN Pf7 dataset, 
+preparing it for machine learning model training. Key preprocessing steps include:
+
+1. Loading and filtering metadata based on quality thresholds
+2. Extracting variant information for selected chromosomes
+3. Processing variants into feature vectors using TF-IDF transformation
+4. Encoding geographic labels for classification
+5. Saving processed data for downstream model training
+
+Design choices:
+- We use TF-IDF vectorization to capture the relative importance of genetic variants
+- We apply batched processing to handle large genomic datasets efficiently
+- We filter samples based on metadata quality to ensure reliable training data
+- We focus on specific chromosomes that have been identified as informative for geographic classification
+
+References:
+- MalariaGEN Pf7: https://www.malariagen.net/parasite/pf7
+- TF-IDF for genomic data: Sundararajan et al. (2018), DOI: 10.1093/bioinformatics/bty237
+"""
+
 import os
 import logging
 from Bio import SeqIO
@@ -18,7 +37,27 @@ import json
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def apply_tfidf_batched(binary_matrix, batch_size=5000):
-    """Apply TF-IDF transformation in batches to save memory"""
+    """
+    Apply TF-IDF transformation to a large binary feature matrix using batched processing.
+    
+    This function handles large sparse matrices by processing them in manageable batches,
+    which prevents memory issues when working with genomic-scale data. TF-IDF transformation
+    is used to highlight variants that are distinctive to particular geographic regions
+    while downweighting commonly occurring variants.
+    
+    Args:
+        binary_matrix (scipy.sparse.csr_matrix): Binary matrix of variant presence/absence
+            with shape [n_samples, n_features]
+        batch_size (int, optional): Number of samples to process in each batch.
+            Default is 5000, which balances memory usage and processing efficiency.
+    
+    Returns:
+        scipy.sparse.csr_matrix: TF-IDF transformed feature matrix with same shape as input
+        
+    Design choice:
+        Batched processing is critical for genomic data where feature matrices can exceed
+        available RAM. The batch size can be adjusted based on available memory.
+    """
     n_samples = binary_matrix.shape[0]
     transformer = TfidfTransformer(norm='l2', smooth_idf=True)
     
@@ -48,6 +87,27 @@ def apply_tfidf_batched(binary_matrix, batch_size=5000):
     return sparse.vstack(result_parts)
 
 def encode_labels(labels, encoder = None):
+    """
+    Encode categorical geographic labels to numeric values for model training.
+    
+    Converts string country names into numeric indices for classification tasks.
+    Can either create a new encoder or use a provided one for consistent encoding
+    between training and test data.
+    
+    Args:
+        labels (array-like): Geographic origin labels (typically country names)
+        encoder (sklearn.preprocessing.LabelEncoder, optional): Existing encoder for consistent
+            encoding between datasets. If None, a new encoder is created. Default is None.
+    
+    Returns:
+        tuple: (encoded_labels, encoder)
+            - encoded_labels (numpy.ndarray): Numeric labels
+            - encoder (sklearn.preprocessing.LabelEncoder): The encoder used
+    
+    Design choice:
+        We return both the encoded labels and the encoder itself to ensure
+        consistent encoding between training, validation, and test sets.
+    """
     if encoder is None:
         encoder = LabelEncoder()
         encoder.fit(labels)
@@ -56,6 +116,27 @@ def encode_labels(labels, encoder = None):
     return encoded_labels, encoder
 
 def main():
+    """
+    Run the complete preprocessing pipeline for malaria genomic data.
+    
+    This function orchestrates the entire preprocessing workflow:
+    1. Configure processing parameters
+    2. Initialize data access to the MalariaGEN Pf7 dataset
+    3. Load and filter metadata based on quality thresholds
+    4. Encode geographic labels for classification
+    5. Process genetic variants to create feature vectors
+    6. Save all processed data for downstream model training
+    
+    The function uses helper methods to modularize each processing step.
+    
+    Returns:
+        None: Results are saved to disk in the configured output directory
+        
+    Design choices:
+        - Selected chromosomes are limited to reduce dimensionality while preserving signal
+        - Quality threshold ensures only high-quality samples are used
+        - Minimum samples per class ensures balanced representation
+    """
     # Create configuration with defaults that can be overridden
     config = {
         "metadata_quality_threshold": 0.5,  # Minimum % callable for quality filter
@@ -107,7 +188,27 @@ def main():
         return
 
 def _load_and_filter_metadata(pf7, config):
-    """Load and filter metadata based on quality criteria"""
+    """
+    Load and filter sample metadata based on quality criteria and class balance.
+    
+    This function:
+    1. Loads the raw sample metadata from MalariaGEN Pf7
+    2. Applies quality filters to remove low-quality samples
+    3. Ensures geographic balance by filtering classes with too few samples
+    4. Logs detailed information about the filtering process
+    
+    Args:
+        pf7 (malariagen_data.Pf7): Initialized Pf7 data access object
+        config (dict): Configuration parameters including quality thresholds
+    
+    Returns:
+        pandas.DataFrame: Filtered metadata for high-quality samples
+        
+    Design choice:
+        Quality filtering is essential for genomic data, as low-quality samples can
+        introduce noise that obscures true geographic signals. The min_samples_per_class
+        threshold ensures we have sufficient examples from each region for effective learning.
+    """
     try:
         # This will initialize data access and might download files if not already present
         sample_metadata = pf7.sample_metadata()
@@ -138,7 +239,29 @@ def _load_and_filter_metadata(pf7, config):
         raise
 
 def _process_variants(pf7, filtered_metadata, config):
-    """Process variant data for selected chromosomes"""
+    """
+    Extract and process genetic variants from selected chromosomes into feature vectors.
+    
+    This function:
+    1. Loads variant data for each selected chromosome
+    2. Converts variants to a binary presence/absence matrix
+    3. Combines features from all chromosomes
+    4. Applies TF-IDF transformation to weight features
+    
+    Args:
+        pf7 (malariagen_data.Pf7): Initialized Pf7 data access object
+        filtered_metadata (pandas.DataFrame): Filtered sample metadata
+        config (dict): Configuration parameters including selected chromosomes
+    
+    Returns:
+        scipy.sparse.csr_matrix: TF-IDF transformed feature matrix for all samples
+        
+    Design choice:
+        We process variants chromosome by chromosome to manage memory usage,
+        and apply TF-IDF to highlight geographic-specific variants while
+        downweighting common variants. Focusing on selected chromosomes
+        reduces dimensionality while preserving discriminative power.
+    """
     try:
         logging.info("Loading variant calls...")
         variant_data = pf7.variant_calls(extended=False)
@@ -181,7 +304,27 @@ def _process_variants(pf7, filtered_metadata, config):
         raise
 
 def _save_outputs(filtered_metadata, tfidf_features, label_encoder, config):
-    """Save all preprocessed data with error handling"""
+    """
+    Save all preprocessed data to disk for downstream model training.
+    
+    This function saves:
+    1. Filtered metadata as CSV
+    2. TF-IDF feature matrix as sparse NPZ file
+    3. Label encoder as pickled object
+    
+    Args:
+        filtered_metadata (pandas.DataFrame): Filtered sample metadata
+        tfidf_features (scipy.sparse.csr_matrix): TF-IDF transformed feature matrix
+        label_encoder (sklearn.preprocessing.LabelEncoder): Encoder for geographic labels
+        config (dict): Configuration parameters including output directory
+        
+    Returns:
+        None: Files are saved to disk
+        
+    Design choice:
+        We save the sparse feature matrix in the NPZ format to preserve memory efficiency.
+        The label encoder is saved to ensure consistent encoding between training and inference.
+    """
     try:
         # Save metadata
         filtered_metadata.to_csv(os.path.join(config["output_dir"], "filtered_metadata.csv"), index=False)
