@@ -134,6 +134,8 @@ As I was building the CNN model, I documented each major version below. Feel fre
 - Dropout layers
 - Label smoothing
 - Gradient clipping
+- Attention pooling
+- Residual block
 
 ```
 [Input: DNA Seq (1000bp, 5 channels)]
@@ -186,14 +188,15 @@ As I was building the CNN model, I documented each major version below. Feel fre
 
 ### Version 5 (this version is cnn_advanced.py): Further Performance Tuning
 Key improvements:
-- Model checkpointing
+- Model and training checkpointing
 - Metric tracking
 - Interpretability
 - Mixed precision training
 - Memory optimizations
 - Multi-GPU support
 - Chromosome position handling
-- Variant simulation
+- Density Residual Block
+- Variant simulations (SNPs, insertions, deletions)
 - Hierarchical attention mechanism
 - Advanced region visualization
 - Complex skip connections
