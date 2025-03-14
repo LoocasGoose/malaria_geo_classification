@@ -28,7 +28,7 @@ src/data/fix_paths.py
 src/data/testing.py
 notebooks/Data_access.ipynb
 create_requirements.py
-requirements.txt
+one_pager.md
 
 # Local Settings
 .env
