@@ -1,7 +1,7 @@
 # Genomic Geographic Classification Framework  
 **Malaria Parasite Origin Prediction**  
 *Machine Learning for Genomic Epidemiology*  
-*[Your Name], [Your University/Department]*  
+*Lucas Gu, University of Berkeley*  
 
 ---  
 ## Project Context  
@@ -21,7 +21,7 @@ Designed a DNA-aware CNN architecture with:
 # Proposed Architecture
 model = DNACNN(
     strand_type="symmetric",  # Reverse-complement equivariance
-    positional_enc="chromosomal",  # Chromosomal context integration
+    positional_encoding="chromosomal",  # Chromosomal context integration
     attention="hierarchical",  # Multi-scale feature weighting
     noise_layers="variant_sim"  # Realistic noise simulation
 )
